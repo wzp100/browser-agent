@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2312181b'/%3E%3Cpath d='M18 16h19c9 0 14 5 14 12 0 5-3 9-8 10 6 1 9 5 9 11 0 9-6 15-16 15H18V16zm12 10v8h7c3 0 5-1 5-4s-2-4-5-4h-7zm0 18v10h8c4 0 6-2 6-5s-2-5-6-5h-8z' fill='%2376cbd2'/%3E%3C/svg%3E" />
+    <title>Browser Agent</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <div id="workspace-layout" class="workspace-layout terminal-collapsed">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <div class="product-name">Browser <span>Agent</span></div>
+            <button id="new-project" class="new-task" type="button"><span>＋</span> 新建任务</button>
+          </div>
+          <div class="sidebar-section-title">项目</div>
+          <nav id="project-list" class="project-list" aria-label="项目和对话">
+            <div class="sidebar-empty">还没有项目</div>
+          </nav>
+          <div class="workspace-panel-shortcuts" aria-label="项目工作区面板">
+            <button id="file-panel-trigger" type="button" aria-controls="file-tree-panel" aria-expanded="false">文件</button>
+            <button id="run-panel-trigger" type="button" aria-controls="run-center-panel" aria-expanded="false">运行</button>
+          </div>
+          <footer class="sidebar-footer">
+            <button id="settings-trigger" class="settings-button" type="button"><span>⚙</span><span>设置</span></button>
+          </footer>
+        </aside>
+
+        <main class="chat-pane">
+          <header class="chat-header">
+            <div class="chat-title-block">
+              <strong id="thread-title">新建任务</strong>
+              <span id="project-label">选择项目文件夹开始</span>
+            </div>
+            <div class="connection-control">
+              <span id="active-model" class="active-model">GPT-5.6</span>
+              <span id="connection-status" class="connection-status disconnected">未连接</span>
+              <button id="connection-action" class="connection-action" type="button" hidden></button>
+            </div>
+          </header>
+
+          <div id="chat-scroll" class="chat-scroll">
+            <section id="empty-state" class="empty-state">
+              <div class="empty-icon">✦</div>
+              <h1>在浏览器里操作真实项目</h1>
+              <strong class="product-subtitle">Browser-native Project Agent</strong>
+              <p>点击左侧“新建任务”并选择一个文件夹。对话、项目关系和目录句柄都会保存在当前浏览器。</p>
+            </section>
+            <section id="message-feed" class="message-feed" aria-live="polite"></section>
+          </div>
+
+          <footer class="composer-zone">
+            <div class="composer">
+              <div id="attachment-preview" class="attachment-preview" aria-live="polite" hidden></div>
+              <textarea id="intent" rows="1" placeholder="输入任务…" disabled></textarea>
+              <div class="template-row">
+                <select id="task-template" aria-label="常用任务模板">
+                  <option value="">常用任务模板…</option>
+                </select>
+                <button id="insert-template" type="button" disabled>插入模板</button>
+              </div>
+              <div class="context-row">
+                <span id="context-status">上下文尚未估算</span>
+                <button id="compress-context" type="button" disabled>立即压缩</button>
+              </div>
+              <div class="composer-row">
+                <div class="composer-tools">
+                  <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden />
+                  <button id="attachment-trigger" class="composer-tool-button" type="button" aria-label="添加图片" title="添加 JPEG、PNG 或 WebP 图片" disabled>＋ 图片</button>
+                  <label class="model-quick-select" title="选择当前对话使用的供应商和模型">
+                    <span class="sr-only">模型供应商</span>
+                    <select id="composer-provider" aria-label="模型供应商" disabled><option value="">供应商</option></select>
+                    <span aria-hidden="true">·</span>
+                    <span class="sr-only">模型</span>
+                    <select id="composer-model" aria-label="模型" disabled><option value="">模型</option></select>
+                  </label>
+                  <button id="refresh-models" class="composer-tool-button icon-only" type="button" aria-label="刷新模型列表" title="刷新模型列表" disabled>↻</button>
+                </div>
+                <div class="composer-actions">
+                  <span id="composer-status">请选择项目文件夹</span>
+                  <button id="stop-run" class="stop-button" type="button" aria-label="停止运行" title="停止当前运行" hidden disabled>■</button>
+                  <button id="send" class="send-button" type="button" aria-label="发送" disabled>↑</button>
+                </div>
+              </div>
+            </div>
+          </footer>
+        </main>
+
+        <section class="terminal-pane">
+          <header class="terminal-header">
+            <div><span class="terminal-chevron">›_</span><strong>终端</strong><span id="runtime-status">未启动</span></div>
+            <div class="terminal-actions">
+              <button id="terminal-toggle" type="button" aria-expanded="false" aria-controls="terminal-host">展开终端</button>
+              <button id="terminal-start" type="button" disabled>启动 Runtime</button>
+              <button id="terminal-clear" type="button" disabled>清空</button>
+            </div>
+          </header>
+          <div id="terminal-host" class="terminal-host"></div>
+        </section>
+
+        <aside id="file-tree-panel" class="future-panel" aria-label="文件树" hidden>
+          <header><div><strong>文件</strong><span>搜索、变更与 Diff</span></div><button class="panel-close" type="button" aria-label="关闭文件面板">×</button></header>
+          <label class="panel-search"><span class="sr-only">搜索项目文件</span><input id="file-search" type="search" placeholder="搜索文件…" /></label>
+          <div id="file-tree" class="file-tree" role="tree"><div class="panel-empty">选择项目后显示文件。</div></div>
+          <section id="diff-viewer" class="diff-viewer" hidden>
+            <header><strong id="diff-title">Diff</strong><button id="diff-close" type="button" aria-label="关闭 Diff">×</button></header>
+            <pre id="diff-content"></pre>
+          </section>
+        </aside>
+        <aside id="run-center-panel" class="future-panel" aria-label="运行记录" hidden>
+          <header><div><strong>运行记录</strong><span>状态、耗时与修改文件</span></div><button class="panel-close" type="button" aria-label="关闭运行面板">×</button></header>
+          <section class="panel-section"><h2>最近运行</h2><div id="run-list" class="run-list"><div class="panel-empty">尚无运行记录。</div></div></section>
+          <section class="panel-section"><h2>恢复记录</h2><div id="changeset-list" class="changeset-list"><div class="panel-empty">尚无 ChangeSet。</div></div></section>
+        </aside>
+      </div>
+    </div>
+
+    <dialog id="settings-dialog" class="settings-dialog">
+      <form method="dialog" class="settings-shell">
+        <header class="settings-header">
+          <div><strong>设置</strong><span>所有配置均在浏览器中完成</span></div>
+          <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+        </header>
+        <div class="settings-content">
+          <section class="settings-section">
+            <h2>外观与语言</h2>
+            <p>选择界面显示语言；设置会保存在当前浏览器中。</p>
+            <label for="app-language">界面语言</label>
+            <select id="app-language">
+              <option value="browser">跟随浏览器</option>
+              <option value="zh-CN">简体中文</option>
+              <option value="en">English</option>
+            </select>
+            <p class="setting-help">更改语言后页面会自动重新载入。</p>
+          </section>
+
+          <section class="settings-section">
+            <h2>项目权限与指令</h2>
+            <p>新项目默认在写入或执行前确认；只读模式不会向模型暴露写入和执行工具。</p>
+            <label for="permission-mode">权限模式</label>
+            <select id="permission-mode">
+              <option value="readOnly">只读</option>
+              <option value="confirmWrites" selected>写入前确认</option>
+              <option value="auto">自动允许</option>
+            </select>
+            <label class="setting-switch" for="project-instructions-enabled">
+              <span><strong>启用项目指令</strong><small id="project-instructions-source">未发现 AGENTS.md 或 .browser-agent/instructions.md</small></span>
+              <input id="project-instructions-enabled" type="checkbox" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h2>模型与 API</h2>
+            <p>Endpoint 和模型名持久保存；API Key 仅保留到当前浏览器会话结束。</p>
+            <div class="section-heading"><label for="provider-mode">Provider</label><button id="add-provider" type="button">添加 OpenAI-compatible</button></div>
+            <select id="provider-mode">
+              <option value="direct">OpenAI Responses</option>
+              <option value="deepseek">DeepSeek Chat Completions</option>
+              <option value="gateway">兼容 Gateway</option>
+            </select>
+            <label for="provider-url">API Endpoint</label>
+            <input id="provider-url" autocomplete="url" />
+            <label for="model-name">模型</label>
+            <input id="model-name" autocomplete="off" />
+            <label for="api-key">API Key</label>
+            <input id="api-key" type="password" autocomplete="off" placeholder="sk-…" />
+            <p id="model-help" class="setting-help"></p>
+            <button id="save-model" class="primary-button" type="button">保存模型配置</button>
+          </section>
+
+          <section class="settings-section">
+            <h2>WebContainer Runtime</h2>
+            <dl class="setting-list">
+              <div><dt>Shell</dt><dd>浏览器内 jsh / Node.js / npm</dd></div>
+              <div><dt>项目目录</dt><dd>与真实文件夹双向同步</dd></div>
+              <div><dt>限制</dt><dd>不支持 EXE、PowerShell、原生 Python、Docker</dd></div>
+            </dl>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading"><h2>Skills</h2><button id="install-skill" type="button">安装 Skill 文件夹</button></div>
+            <div id="skill-list" class="skill-list"></div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading">
+              <h2>诊断日志</h2>
+              <div class="log-actions">
+                <button id="refresh-logs" type="button">刷新</button>
+                <button id="export-logs" type="button">导出 JSONL</button>
+                <button id="clear-logs" type="button">清空</button>
+              </div>
+            </div>
+            <p>记录时间、级别、模块、运行状态和错误栈；不会记录 API Key、Authorization 或文件正文。</p>
+            <div class="setting-switches">
+              <label class="setting-switch" for="logging-enabled">
+                <span><strong>保存诊断日志</strong><small>关闭后仅在控制台保留 WARN 和 ERROR。</small></span>
+                <input id="logging-enabled" type="checkbox" checked />
+              </label>
+              <label class="setting-switch" for="project-logging-enabled">
+                <span><strong>同时写入项目 .browser-agent</strong><small>以脱敏 JSONL 写入项目日志目录。</small></span>
+                <input id="project-logging-enabled" type="checkbox" />
+              </label>
+            </div>
+            <label for="log-level">最低日志级别</label>
+            <select id="log-level">
+              <option value="trace">TRACE · 最完整</option>
+              <option value="debug">DEBUG · 排障推荐</option>
+              <option value="info">INFO · 常规</option>
+              <option value="warn">WARN · 警告及错误</option>
+              <option value="error">ERROR · 仅错误</option>
+            </select>
+            <div id="log-list" class="log-list" aria-live="polite"></div>
+          </section>
+
+          <section class="settings-section">
+            <h2>本地数据</h2>
+            <dl class="setting-list">
+              <div><dt>对话与项目</dt><dd>IndexedDB，保留到手动删除</dd></div>
+              <div><dt>Skills 与恢复数据</dt><dd>OPFS</dd></div>
+              <div><dt>存储使用</dt><dd id="storage-usage">正在读取…</dd></div>
+            </dl>
+            <div class="data-actions">
+              <button id="export-local-data" type="button">导出项目数据</button>
+              <input id="import-local-data-input" type="file" accept="application/json,.json" hidden />
+              <button id="import-local-data" type="button">导入项目数据</button>
+            </div>
+          </section>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,50 @@
+{
+  "name": "browser-agent",
+  "private": true,
+  "version": "0.3.0",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=11.7.0"
+  },
+  "scripts": {
+    "dev": "pnpm --dir apps/web dev",
+    "gateway": "pnpm --dir apps/gateway dev",
+    "build": "pnpm typecheck && pnpm --dir apps/web build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:install": "playwright install chromium",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:bundle": "node scripts/check-bundle-size.mjs",
+    "verify:office": "tsx scripts/verify-office-artifacts.ts",
+    "verify:office:strict": "tsx scripts/verify-office-artifacts.ts --strict",
+    "verify": "pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm audit --prod && pnpm build && pnpm check:bundle && pnpm test:e2e && pnpm verify:office"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.2",
+    "@langchain/deepseek": "^1.1.5",
+    "@langchain/langgraph": "^1.4.7",
+    "@langchain/openai": "^1.5.5",
+    "@webcontainer/api": "^1.6.1",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "docx": "^9.5.1",
+    "jszip": "^3.10.1",
+    "loglevel": "^1.9.2",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.1.200",
+    "pptxgenjs": "^4.0.1",
+    "xlsx": "file:vendor/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^24.0.0",
+    "fake-indexeddb": "^6.2.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0"
+  }
+}

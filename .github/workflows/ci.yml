@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install dependencies
+        run: corepack pnpm@11.7.0 install --frozen-lockfile
+      - name: Typecheck
+        run: corepack pnpm@11.7.0 typecheck
+      - name: Test
+        run: corepack pnpm@11.7.0 test
+      - name: Check dependency boundaries
+        run: corepack pnpm@11.7.0 check:boundaries
+      - name: Audit production dependencies
+        run: corepack pnpm@11.7.0 audit --prod
+      - name: Build
+        run: corepack pnpm@11.7.0 build
+      - name: Check initial bundle size
+        run: corepack pnpm@11.7.0 check:bundle
+      - name: Install Chromium
+        run: corepack pnpm@11.7.0 exec playwright install --with-deps chromium
+      - name: Browser E2E
+        run: corepack pnpm@11.7.0 test:e2e
+      - name: Office and PDF artifact validation
+        run: corepack pnpm@11.7.0 verify:office

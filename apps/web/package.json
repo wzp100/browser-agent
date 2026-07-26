@@ -1,0 +1,14 @@
+{
+  "name": "@browser-agent/web",
+  "private": true,
+  "version": "0.3.0",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "markstream-vue": "^1.0.5",
+    "vue": "^3.5.39"
+  }
+}

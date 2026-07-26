@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+*.log
+.browser-agent/
+.wrangler/
+.env
+.env.*
+!.env.example
+coverage/
+.playwright-cli/
+output/
+.DS_Store
+Thumbs.db

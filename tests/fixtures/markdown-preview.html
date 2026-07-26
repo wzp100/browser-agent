@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Markstream 消息预览</title>
+    <style>
+      .preview-shell { height: 100vh; overflow: auto; background: #131516; }
+      .preview-heading { width: min(820px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 0; color: #8d969c; font-size: 12px; }
+      .test-support { display: none; }
+    </style>
+  </head>
+  <body>
+    <main class="preview-shell">
+      <div class="preview-heading">AppUi · Markstream 静态与流式消息预览</div>
+      <div id="chat-scroll" class="chat-scroll">
+        <section id="empty-state" hidden></section>
+        <section id="message-feed" class="message-feed"></section>
+      </div>
+    </main>
+    <aside id="workspace-layout" class="test-support">
+      <button id="new-project"></button><div id="project-list"></div><div id="thread-title" data-active="true"></div>
+      <div id="project-label"></div><div id="active-model"></div><div id="connection-status"></div><button id="connection-action"></button>
+      <div class="composer"><textarea id="intent"></textarea><input id="attachment-input" type="file" /><button id="attachment-trigger"></button><div id="attachment-preview"></div></div>
+      <button id="send"></button><button id="stop-run"></button><div id="composer-status"></div>
+      <select id="composer-provider"></select><select id="composer-model"></select><button id="refresh-models"></button><div id="context-status"></div><button id="compress-context"></button>
+      <select id="task-template"></select><button id="insert-template"></button>
+      <button id="file-panel-trigger"></button><button id="run-panel-trigger"></button>
+      <aside id="file-tree-panel" hidden><button class="panel-close"></button><input id="file-search" /><div id="file-tree"></div><section id="diff-viewer" hidden><span id="diff-title"></span><button id="diff-close"></button><pre id="diff-content"></pre></section></aside>
+      <aside id="run-center-panel" hidden><button class="panel-close"></button><div id="run-list"></div><div id="changeset-list"></div></aside>
+      <div id="terminal-host"></div><button id="terminal-toggle"></button><button id="terminal-start"></button><button id="terminal-clear"></button><div id="runtime-status"></div><button id="settings-trigger"></button>
+      <dialog id="settings-dialog"></dialog><select id="provider-mode"><option value="direct">direct</option></select><input id="provider-url" />
+      <input id="model-name" /><input id="api-key" /><div id="model-help"></div><button id="save-model"></button><button id="install-skill"></button>
+      <div id="skill-list"></div><input id="logging-enabled" type="checkbox" /><input id="project-logging-enabled" type="checkbox" />
+      <select id="log-level"><option value="debug">debug</option></select><button id="refresh-logs"></button>
+      <button id="export-logs"></button><button id="clear-logs"></button><div id="log-list"></div><div id="storage-usage"></div><div id="toast"></div>
+      <select id="permission-mode"><option value="confirmWrites">confirmWrites</option></select><input id="project-instructions-enabled" type="checkbox" /><span id="project-instructions-source"></span>
+      <button id="export-local-data"></button><input id="import-local-data-input" type="file" /><button id="import-local-data"></button>
+    </aside>
+    <script type="module">
+      import "/src/style.css";
+      import { AppUi } from "/src/ui.ts";
+
+      const ui = new AppUi();
+      const now = new Date().toISOString();
+      ui.appendMessage({
+        id: "static-markdown",
+        threadId: "preview",
+        sequence: 1,
+        role: "assistant",
+        kind: "assistant",
+        createdAt: now,
+        content: "# Markdown 渲染成功\n\n支持 **粗体**、[链接](https://markstream.simonhe.me/) 和列表：\n\n- 第一项\n- 第二项\n\n> 这是一段引用。\n\n本次输出文件：\n\n- [输出 报告/结果.md](/__workspace_file__/%E8%BE%93%E5%87%BA%20%E6%8A%A5%E5%91%8A/%E7%BB%93%E6%9E%9C.md)\n\n```ts\nconst streaming = true;\n```"
+      });
+      ui.appendMessage({
+        id: "tool-start-1", threadId: "preview", sequence: 2, role: "system", kind: "tool", createdAt: now,
+        content: "shell.exec {\"command\":\"pnpm test\"}",
+        metadata: { runId: "preview-run", callId: "call-1", eventKind: "tool-start", toolName: "shell.exec", arguments: { command: "pnpm test" } }
+      });
+      ui.appendMessage({
+        id: "tool-result-1", threadId: "preview", sequence: 3, role: "system", kind: "tool", createdAt: now,
+        content: "{\"exitCode\":0,\"stdout\":\"16 tests passed\",\"stderr\":\"\"}",
+        metadata: { runId: "preview-run", callId: "call-1", eventKind: "tool-result", toolName: "shell.exec" }
+      });
+      ui.appendMessage({
+        id: "tool-start-2", threadId: "preview", sequence: 4, role: "system", kind: "tool", createdAt: now,
+        content: "workspace.read {\"path\":\"/src/app.ts\"}",
+        metadata: { runId: "preview-run", callId: "call-2", eventKind: "tool-start", toolName: "workspace.read", arguments: { path: "/src/app.ts" } }
+      });
+      ui.appendMessage({
+        id: "tool-result-2", threadId: "preview", sequence: 5, role: "system", kind: "tool", createdAt: now,
+        content: "{\"content\":\"export class App {}\",\"truncated\":false}",
+        metadata: { runId: "preview-run", callId: "call-2", eventKind: "tool-result", toolName: "workspace.read" }
+      });
+      ui.completeToolRun("preview-run", "completed");
+      ui.appendMessage({
+        id: "tool-start-3", threadId: "preview", sequence: 6, role: "system", kind: "tool", createdAt: now,
+        content: "shell.exec {\"command\":\"pnpm build\"}",
+        metadata: { runId: "preview-running", callId: "call-3", eventKind: "tool-start", toolName: "shell.exec", arguments: { command: "pnpm build" } }
+      });
+      const chunks = ["## 流式消息", "\n\n内容会", "随着 SSE 增量", "持续渲染，", "而不是等待完整响应。"];
+      let content = "";
+      for (const [index, chunk] of chunks.entries()) {
+        setTimeout(() => {
+          content += chunk;
+          ui.appendAssistantDelta(chunk);
+          if (index === chunks.length - 1) ui.completeAssistantMessage({
+            id: "streaming-markdown",
+            threadId: "preview",
+            sequence: 7,
+            role: "assistant",
+            kind: "assistant",
+            createdAt: now,
+            content
+          });
+        }, 120 * (index + 1));
+      }
+    </script>
+  </body>
+</html>

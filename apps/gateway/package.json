@@ -1,0 +1,9 @@
+{
+  "name": "@browser-agent/gateway",
+  "private": true,
+  "version": "0.3.0",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tsx src/server.ts"
+  }
+}

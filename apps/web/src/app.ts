@@ -24,7 +24,7 @@ import {
   type RunRecord,
   type ThreadRecord
 } from "../../../packages/persistence/src/index";
-import { BUILTIN_TASK_TEMPLATES, loadProjectInstructions } from "../../../packages/project-context/src/index";
+import { loadProjectInstructions } from "../../../packages/project-context/src/index";
 import { importProjectBackup, serializeProjectBackup, type ProjectBackupImportBundle } from "../../../packages/project-backup/src/index";
 import { inspectWebContainerSupport, WebContainerRuntimeProvider, WorkspaceMirror, type MirrorEvent } from "../../../packages/runtime-webcontainer/src/index";
 import type { InteractiveRuntimeSession, RuntimeSession, ScriptExecutionRequest, ScriptExecutionResult, ScriptRuntimeProvider, TerminalDimensions } from "../../../packages/runtime-contracts/src/index";
@@ -165,7 +165,6 @@ export class BrowserAgentApp {
     this.ui.refreshLogs.addEventListener("click", () => void this.refreshLogs());
     this.ui.exportLogs.addEventListener("click", () => void this.exportLogs());
     this.ui.clearLogs.addEventListener("click", () => void this.clearLogs());
-    this.ui.setTaskTemplates(BUILTIN_TASK_TEMPLATES.map((template) => ({ id: template.id, label: template.name, prompt: template.prompt })));
     window.addEventListener("focus", () => { if (this.mirror.ready) void this.mirror.syncExternalChanges(); });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && this.mirror.ready) void this.mirror.syncExternalChanges(); });
   }

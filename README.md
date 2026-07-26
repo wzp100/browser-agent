@@ -6,14 +6,14 @@
 
 Work with real local folders, run Node.js tools in a WebContainer, and create Office files—without installing a desktop agent or uploading your entire workspace.
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100.pages.dev/)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100-app.pages.dev/)
 [![CI](https://img.shields.io/github/actions/workflow/status/wzp100/browser-agent/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wzp100/browser-agent/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8+-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-76cbd2?style=for-the-badge)](LICENSE)
 
 **English** · [简体中文](README.zh-CN.md)
 
-[Open Browser Agent](https://browser-agent-wzp100.pages.dev/) · [Architecture](docs/architecture/ARCHITECTURE.md) · [API configuration](docs/architecture/API-CONFIGURATION.md)
+[Open Browser Agent](https://browser-agent-wzp100-app.pages.dev/) · [Architecture](docs/architecture/ARCHITECTURE.md) · [API configuration](docs/architecture/API-CONFIGURATION.md)
 
 </div>
 
@@ -68,7 +68,7 @@ See [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for the full data flow 
 
 ## Try the live app
 
-Open **<https://browser-agent-wzp100.pages.dev/>** in a standalone Chrome or Edge window.
+Open **<https://browser-agent-wzp100-app.pages.dev/>** in a standalone Chrome or Edge window.
 
 1. Select **New task** and grant access to a project folder.
 2. Open **Settings**, choose a provider and model, and enter your API key.
@@ -167,14 +167,30 @@ tests/                 Unit, integration, and browser E2E tests
 
 ## Deployment
 
-The production application is hosted on Cloudflare Pages with the following build settings:
+The included GitHub Actions workflow verifies and deploys both long-lived branches when the repository has `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` configured:
 
-- **Production:** <https://browser-agent-wzp100.pages.dev/>
+| Branch | Purpose | Site |
+|---|---|---|
+| `develop` | Active development and verification | <https://develop.browser-agent-wzp100-app.pages.dev/> |
+| `main` | Production releases | <https://browser-agent-wzp100-app.pages.dev/> |
+
+Push changes to `develop` first and verify the development site. Promote the same commit to `main` only when it is ready for production; once the Cloudflare credentials are configured, pushing either branch automatically updates its mapped site.
+
 - **Build command:** `corepack pnpm@11.7.0 build`
 - **Output directory:** `apps/web/dist`
 - **Required headers:** COOP `same-origin` and COEP `credentialless`
 
-The response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
+Wrangler 4 is pinned as a development dependency and configured by [`wrangler.jsonc`](wrangler.jsonc):
+
+```bash
+pnpm cloudflare:whoami
+pnpm cloudflare:inspect
+pnpm cloudflare:dev
+pnpm cloudflare:deploy:preview
+pnpm cloudflare:deploy:production
+```
+
+The deploy scripts build before uploading and map preview to `develop` and production to `main`. For CI, create a scoped Cloudflare API token with **Account / Cloudflare Pages / Edit**, save it as the GitHub Actions secret `CLOUDFLARE_API_TOKEN`, and set the account ID as the Actions variable `CLOUDFLARE_ACCOUNT_ID`. The response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
 
 ## Documentation
 

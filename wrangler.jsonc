@@ -1,0 +1,6 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "browser-agent-wzp100-app",
+  "compatibility_date": "2026-07-26",
+  "pages_build_output_dir": "./apps/web/dist"
+}

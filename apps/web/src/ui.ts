@@ -109,12 +109,6 @@ export interface SkillActions {
   uninstall?(skillId: string): void | Promise<void>;
 }
 
-export interface TaskTemplate {
-  id: string;
-  label: string;
-  prompt: string;
-}
-
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_IMAGE_BYTES = 16 * 1024 * 1024;
@@ -169,8 +163,6 @@ export class AppUi {
   readonly attachmentPreview = required<HTMLElement>("#attachment-preview");
   readonly contextStatus = required<HTMLElement>("#context-status");
   readonly compressContext = required<HTMLButtonElement>("#compress-context");
-  readonly taskTemplate = required<HTMLSelectElement>("#task-template");
-  readonly insertTemplate = required<HTMLButtonElement>("#insert-template");
   readonly filePanelTrigger = required<HTMLButtonElement>("#file-panel-trigger");
   readonly runPanelTrigger = required<HTMLButtonElement>("#run-panel-trigger");
   readonly fileTreePanel = required<HTMLElement>("#file-tree-panel");
@@ -226,15 +218,11 @@ export class AppUi {
   private composerModels: ModelDescriptor[] = [];
   private modelSelectorBusy = false;
   private attachmentBytes = 0;
-  private taskTemplates = new Map<string, TaskTemplate>();
   private fileEntries: FileTreeItem[] = [];
   private fileTreeActions: FileTreeActions = {};
 
   constructor() {
     this.intent.addEventListener("input", () => this.resizeComposer());
-    this.setTaskTemplates(DEFAULT_TASK_TEMPLATES);
-    this.taskTemplate.addEventListener("change", () => { this.insertTemplate.disabled = !this.taskTemplate.value || this.intent.disabled; });
-    this.insertTemplate.addEventListener("click", () => this.applySelectedTemplate());
     this.filePanelTrigger.addEventListener("click", () => this.toggleWorkspacePanel(this.fileTreePanel, this.filePanelTrigger));
     this.runPanelTrigger.addEventListener("click", () => this.toggleWorkspacePanel(this.runCenterPanel, this.runPanelTrigger));
     for (const close of this.fileTreePanel.querySelectorAll<HTMLButtonElement>(".panel-close")) close.addEventListener("click", () => this.closeWorkspacePanel(this.fileTreePanel, this.filePanelTrigger));
@@ -288,14 +276,6 @@ export class AppUi {
     this.projectInstructionsEnabled.checked = enabled;
     this.projectInstructionsEnabled.disabled = !source;
     this.projectInstructionsSource.textContent = source ? `当前来源：${source}` : "未发现 AGENTS.md 或 .browser-agent/instructions.md";
-  }
-
-  setTaskTemplates(templates: TaskTemplate[]): void {
-    const selected = this.taskTemplate.value;
-    this.taskTemplates = new Map(templates.map((template) => [template.id, template]));
-    this.taskTemplate.replaceChildren(option("", "常用任务模板…"), ...templates.map((template) => option(template.id, template.label)));
-    this.taskTemplate.value = this.taskTemplates.has(selected) ? selected : "";
-    this.insertTemplate.disabled = !this.taskTemplate.value || this.intent.disabled;
   }
 
   renderFileTree(entries: FileTreeItem[], actions: FileTreeActions = {}): void {
@@ -707,8 +687,6 @@ export class AppUi {
     this.projectLabel.textContent = project?.name ?? "选择项目文件夹开始";
     this.intent.disabled = !thread;
     this.send.disabled = !thread;
-    this.taskTemplate.disabled = !thread;
-    this.insertTemplate.disabled = !thread || !this.taskTemplate.value;
     this.setAttachmentInputEnabled(Boolean(thread));
     this.updateComposerControls();
     this.terminalStart.disabled = !thread;
@@ -772,15 +750,6 @@ export class AppUi {
     if (!selection.accepted.length || !this.attachmentHandler) return;
     try { await this.attachmentHandler(selection.accepted); }
     catch (error) { this.toast(error instanceof Error ? error.message : String(error)); }
-  }
-
-  private applySelectedTemplate(): void {
-    const template = this.taskTemplates.get(this.taskTemplate.value);
-    if (!template || this.intent.disabled) return;
-    const prefix = this.intent.value.trim();
-    this.intent.value = prefix ? `${prefix}\n\n${template.prompt}` : template.prompt;
-    this.intent.dispatchEvent(new Event("input", { bubbles: true }));
-    this.intent.focus();
   }
 
   private toggleWorkspacePanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
@@ -893,17 +862,6 @@ export class AppUi {
   resizeComposer(): void { this.intent.style.height = "auto"; this.intent.style.height = `${Math.min(this.intent.scrollHeight, 150)}px`; }
   scrollToBottom(): void { requestAnimationFrame(() => { this.chatScroll.scrollTop = this.chatScroll.scrollHeight; }); }
 }
-
-const DEFAULT_TASK_TEMPLATES: TaskTemplate[] = [
-  { id: "health", label: "项目健康检查", prompt: "请检查当前项目的结构、依赖、构建、测试和明显风险，先读取证据，再给出按优先级排序的结论。" },
-  { id: "fix-tests", label: "修复测试", prompt: "请运行测试定位失败原因，实施最小范围修复，并重新运行相关测试验证。" },
-  { id: "readonly-review", label: "只读审查", prompt: "请以只读方式审查当前项目，不修改文件；列出有证据支持的问题、影响和建议。" },
-  { id: "change-verify", label: "修改并验证", prompt: "请完成我描述的修改，保留无关用户改动，并运行与风险相称的检查验证结果。\n\n修改目标：" },
-  { id: "csv-report", label: "CSV 报告", prompt: "请分析相关项目数据并生成可复核的 CSV 报告，写入我指定的位置；完成后重新读取验证。" },
-  { id: "word-report", label: "Word 报告", prompt: "请基于项目中的真实证据生成结构化 Word 报告（DOCX），写入我指定的位置；完成后验证并重新检查文档。" },
-  { id: "ppt-briefing", label: "PPT 汇报", prompt: "请基于项目中的真实证据制作多页 PPT 汇报，写入我指定的位置；完成后验证并重新检查演示文稿。" },
-  { id: "pdf-output", label: "PDF 输出", prompt: "请基于项目中的真实证据生成 PDF，写入我指定的位置；完成后验证并重新检查页面内容与结构。" }
-];
 
 function required<T extends Element>(selector: string): T { const value = document.querySelector<T>(selector); if (!value) throw new Error(`UI 缺少元素：${selector}`); return value; }
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] { const value = document.createElement(tag); if (className) value.className = className; if (text !== undefined) value.textContent = text; return value; }

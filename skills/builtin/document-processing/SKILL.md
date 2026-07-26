@@ -1,6 +1,6 @@
 ---
 name: document-processing
-description: 在浏览器主线程检查或创建真实项目中的 DOCX 文档；适用于 Word、报告、说明文档和 DOCX 输出任务。
+description: 在浏览器主线程检查或创建真实项目中的 DOCX 文档；适用于 Word 报告、说明文档和基于项目资料生成并验证 DOCX 的任务。
 ---
 
 ## 环境约束
@@ -19,5 +19,6 @@ description: 在浏览器主线程检查或创建真实项目中的 DOCX 文档�
    - 图片使用 PNG/JPEG base64 data URL，并提供合理的宽高和替代文本。
 4. 默认创建新文件。只有用户明确要求覆盖时才覆盖，且必须把最新 fingerprint 传给 `document.create`。
 5. 写入后必须用 `office.validate` 验证，再用 `office.inspect` 复查实际结构；检查摘要中的标题层级、段落、列表、表格、图片以及页眉页脚状态。
+6. 用户要求“Word 报告”时，先从项目文件取得可引用的真实证据，再生成结构清晰的多节 DOCX；结论不得超出已读取资料。
 
 不要调用未注册的 `word validate`，不要承诺批注、修订追踪、目录自动更新等尚未实现的高级 Word 功能。

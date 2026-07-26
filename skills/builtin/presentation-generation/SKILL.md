@@ -1,6 +1,6 @@
 ---
 name: presentation-generation
-description: 在浏览器主线程检查或创建简洁 PPTX；适用于 PowerPoint、演示文稿、幻灯片和 PPTX 输出任务。
+description: 在浏览器主线程检查或创建简洁 PPTX；适用于 PowerPoint、PPT 汇报、幻灯片和基于项目资料生成并验证演示文稿的任务。
 ---
 
 ## 环境约束
@@ -20,5 +20,6 @@ description: 在浏览器主线程检查或创建简洁 PPTX；适用于 PowerPo
    - `theme`：可设置背景、标题、正文、弱化色、强调色和字体。
 4. 默认创建新文件。只有用户明确要求覆盖时才覆盖，且必须传入最新 fingerprint。
 5. 写入后必须用 `office.validate` 验证，再用 `office.inspect` 复查每页标题、文本、表格数和图片数。
+6. 用户要求“PPT 汇报”时，先读取项目中的真实证据，再制作有明确叙事顺序的多页演示；没有证据的内容不得作为事实写入。
 
 可见内容必须面向最终受众，不能暴露内部计划或生成提示。不要调用未注册的 `ppt validate`，不要承诺动画、视频或复杂母版编辑等尚未实现的功能。

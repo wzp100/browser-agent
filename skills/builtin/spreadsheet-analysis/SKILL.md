@@ -1,6 +1,6 @@
 ---
 name: spreadsheet-analysis
-description: 在浏览器主线程读取、分析、转换或创建真实项目中的 XLSX、XLS、CSV；适用于 Excel、工作簿、表格、筛选、排序、去重和分组计数任务。
+description: 在浏览器主线程读取、分析、转换或创建真实项目中的 XLSX、XLS、CSV；适用于 Excel、工作簿、CSV 分析报告、筛选、排序、去重和分组汇总任务。
 ---
 
 ## 环境约束
@@ -15,6 +15,7 @@ description: 在浏览器主线程读取、分析、转换或创建真实项目�
 4. 默认输出新的 `.xlsx` 并保留原件。只有用户明确要求覆盖时才覆盖，且必须先读取目标文件并传入最新 fingerprint。
 5. 写入后调用 `office.validate`，再用 `office.inspect` 或 `spreadsheet.read` 检查实际输出。
 6. `.xls` 源文件保留不动，输出标准化为新的 `.xlsx`。
+7. 用户要求“CSV 分析报告”时，基于真实数据生成经过验证的 XLSX 汇总；若还需要文字结论，使用 `workspace.write` 输出配套 Markdown，并重新读取核对。
 
 不要调用未注册的 `excel inspect`、`excel validate` 或虚构的 WorkbookResource。
 所有 `workspace.*`、`office.*` 和 `spreadsheet.*` 路径都使用项目相对形式（例如 `/销售数据.xlsx`），不要添加逻辑 Shell 前缀 `/workspace`。

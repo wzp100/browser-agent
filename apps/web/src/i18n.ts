@@ -12,7 +12,7 @@ const ENGLISH_TEXT: Readonly<Record<string, string>> = {
   "选择项目文件夹开始": "Select a project folder to get started", "未连接": "Disconnected",
   "在浏览器里操作真实项目": "Work with real projects in your browser",
   "点击左侧“新建任务”并选择一个文件夹。对话、项目关系和目录句柄都会保存在当前浏览器。": "Select New task on the left and choose a folder. Conversations, project links, and directory handles stay in this browser.",
-  "输入任务…": "Describe a task…", "常用任务模板": "Task templates", "常用任务模板…": "Task templates…", "插入模板": "Insert template",
+  "输入任务…": "Describe a task…",
   "上下文尚未估算": "Context not estimated yet", "立即压缩": "Compress now", "添加图片": "Add images",
   "添加 JPEG、PNG 或 WebP 图片": "Add JPEG, PNG, or WebP images", "＋ 图片": "+ Image",
   "选择当前对话使用的供应商和模型": "Choose the provider and model for this conversation", "模型供应商": "Model provider",

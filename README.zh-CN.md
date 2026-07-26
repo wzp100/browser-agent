@@ -6,14 +6,14 @@
 
 直接处理本地真实文件夹，在 WebContainer 中运行 Node.js 工具，并生成 Office 文件——无需安装桌面 Agent，也不会自动上传整个工作区。
 
-[![在线体验](https://img.shields.io/badge/在线体验-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100.pages.dev/)
+[![在线体验](https://img.shields.io/badge/在线体验-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100-app.pages.dev/)
 [![CI](https://img.shields.io/github/actions/workflow/status/wzp100/browser-agent/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wzp100/browser-agent/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8+-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![许可证](https://img.shields.io/badge/License-MIT-76cbd2?style=for-the-badge)](LICENSE)
 
 [English](README.md) · **简体中文**
 
-[打开 Browser Agent](https://browser-agent-wzp100.pages.dev/) · [架构说明](docs/architecture/ARCHITECTURE.md) · [API 配置](docs/architecture/API-CONFIGURATION.md)
+[打开 Browser Agent](https://browser-agent-wzp100-app.pages.dev/) · [架构说明](docs/architecture/ARCHITECTURE.md) · [API 配置](docs/architecture/API-CONFIGURATION.md)
 
 </div>
 
@@ -70,7 +70,7 @@ apps/web
 
 请使用独立 Chrome 或 Edge 窗口打开：
 
-### <https://browser-agent-wzp100.pages.dev/>
+### <https://browser-agent-wzp100-app.pages.dev/>
 
 1. 点击“新建任务”，选择项目文件夹并授权。
 2. 打开“设置”，选择供应商和模型，填写 API Key。
@@ -169,14 +169,30 @@ tests/                 单元、集成及浏览器 E2E 测试
 
 ## 部署
 
-生产环境托管在 Cloudflare Pages，构建设置如下：
+仓库内置的 GitHub Actions 工作流会先验证再部署两个长期分支；启用部署需要配置 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`：
 
-- **生产站点：** <https://browser-agent-wzp100.pages.dev/>
+| 分支 | 用途 | 站点 |
+|---|---|---|
+| `develop` | 日常开发与上线前验证 | <https://develop.browser-agent-wzp100-app.pages.dev/> |
+| `main` | 生产发布 | <https://browser-agent-wzp100-app.pages.dev/> |
+
+修改先推送到 `develop` 并验证开发站；确认可以生产发布后，将同一提交提升到 `main`。完成 Cloudflare 凭据配置后，推送任一分支都会自动更新对应站点。
+
 - **构建命令：** `corepack pnpm@11.7.0 build`
 - **输出目录：** `apps/web/dist`
 - **必要响应头：** COOP `same-origin`、COEP `credentialless`
 
-响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
+项目已将 Wrangler 4 固定为开发依赖，并通过 [`wrangler.jsonc`](wrangler.jsonc) 配置：
+
+```bash
+pnpm cloudflare:whoami
+pnpm cloudflare:inspect
+pnpm cloudflare:dev
+pnpm cloudflare:deploy:preview
+pnpm cloudflare:deploy:production
+```
+
+部署脚本会先构建，再将预览部署映射到 `develop`、生产部署映射到 `main`。CI 需要创建仅含 **Account / Cloudflare Pages / Edit** 权限的 API Token，保存为 GitHub Actions Secret `CLOUDFLARE_API_TOKEN`，并将账户 ID 保存为 Actions Variable `CLOUDFLARE_ACCOUNT_ID`。响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
 
 ## 文档
 

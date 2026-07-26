@@ -166,11 +166,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attachment-item figcaption span { margin-top: 4px; color: #7e888d; font-size: 9px; }
 .attachment-remove { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: #343a3e; color: #aeb5b9; font-size: 13px; line-height: 1; cursor: pointer; }
 .attachment-remove:hover { background: #603b42; color: #fff; }
-.template-row { min-height: 24px; display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.template-row select { min-width: 0; max-width: 180px; height: 23px; padding: 0 4px; border: 0; border-radius: 4px; background: #222729; color: #8f989c; font-size: 10px; }
-.template-row button { height: 23px; padding: 0 7px; border: 0; border-radius: 4px; background: transparent; color: #9e92c6; font-size: 10px; cursor: pointer; }
-.template-row button:hover:not(:disabled) { background: rgba(164,124,255,.12); color: #c8b6ff; }
-.template-row button:disabled { color: #62696d; cursor: not-allowed; }
 .context-row { min-height: 21px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 5px; color: #80898d; font-size: 10px; }
 .context-row button { padding: 2px 7px; border: 0; border-radius: 4px; background: transparent; color: #9e92c6; font-size: 10px; cursor: pointer; }
 .context-row button:hover:not(:disabled) { background: rgba(164,124,255,.12); color: #c8b6ff; }

@@ -5,7 +5,7 @@
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": ">=20",
+    "node": ">=22",
     "pnpm": ">=11.7.0"
   },
   "scripts": {
@@ -19,6 +19,11 @@
     "test:e2e:install": "playwright install chromium",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs",
+    "cloudflare:whoami": "wrangler whoami",
+    "cloudflare:inspect": "wrangler pages deployment list --project-name browser-agent-wzp100-app",
+    "cloudflare:dev": "pnpm build && wrangler pages dev apps/web/dist",
+    "cloudflare:deploy:preview": "pnpm build && wrangler pages deploy apps/web/dist --project-name browser-agent-wzp100-app --branch develop",
+    "cloudflare:deploy:production": "pnpm build && wrangler pages deploy apps/web/dist --project-name browser-agent-wzp100-app --branch main",
     "verify:office": "tsx scripts/verify-office-artifacts.ts",
     "verify:office:strict": "tsx scripts/verify-office-artifacts.ts --strict",
     "verify": "pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm audit --prod && pnpm build && pnpm check:bundle && pnpm test:e2e && pnpm verify:office"
@@ -45,6 +50,7 @@
     "fake-indexeddb": "^6.2.4",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "wrangler": "4.114.0"
   }
 }

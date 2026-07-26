@@ -293,6 +293,9 @@ test("系统提示明确注入特殊 jsh 环境和已安装 Skill", () => {
   assert.match(prompt, /不要调用或探测 Python\/python3\/pip\/conda/);
   assert.match(prompt, /逻辑工作目录：\/workspace/);
   assert.match(prompt, /spreadsheet-analysis: 浏览器内处理表格/);
+  assert.match(prompt, /环境快照只提供已安装 Skill 的路由摘要/);
+  assert.match(prompt, /必须在调用该领域工具前主动使用 skill\.inspect/);
+  assert.match(prompt, /不要要求用户选择模板/);
 });
 
 test("AgentLoop 连续两次工具失败后立即熔断而不是卡住", async () => {

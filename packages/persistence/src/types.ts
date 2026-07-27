@@ -113,9 +113,23 @@ export interface RunRecord {
   retryOf?: string;
   inputMessageId?: string;
   changeSetId?: string;
+  checkpoint?: unknown;
   events: Array<{ at: string; kind: "phase" | "tool" | "error"; content: string; eventKind?: "tool-start" | "tool-result" | "error"; toolName?: string; networkHost?: string }>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ModelProbeRecord {
+  id: string;
+  providerProfileId: string;
+  modelId: string;
+  endpointOrigin: string;
+  text: boolean;
+  toolCalling: boolean;
+  imageInput: boolean;
+  streaming: boolean;
+  testedAt: string;
+  details?: Record<string, string>;
 }
 
 export interface ModelSettingsRecord {
@@ -137,4 +151,22 @@ export interface ModelsDevCacheRecord {
   etag?: string;
   fetchedAt: string;
   catalog: unknown;
+}
+
+export interface McpServerRecord {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  lastTestedAt?: string;
+  lastToolCount?: number;
+  lastError?: string;
+  cachedTools?: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpSettingsRecord {
+  key: "mcp-servers";
+  servers: McpServerRecord[];
 }

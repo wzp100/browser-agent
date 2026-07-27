@@ -19,7 +19,7 @@
       </div>
     </main>
     <aside id="workspace-layout" class="test-support">
-      <button id="new-project"></button><div id="project-list"></div><div id="thread-title" data-active="true"></div>
+      <button id="new-project"></button><button id="plugins-trigger"></button><div id="project-list"></div><div id="thread-title" data-active="true"></div>
       <div id="project-label"></div><div id="active-model"></div><div id="connection-status"></div><button id="connection-action"></button>
       <div class="composer"><textarea id="intent"></textarea><input id="attachment-input" type="file" /><button id="attachment-trigger"></button><div id="attachment-preview"></div></div>
       <button id="send"></button><button id="stop-run"></button><div id="composer-status"></div>
@@ -28,9 +28,11 @@
       <aside id="file-tree-panel" hidden><button class="panel-close"></button><input id="file-search" /><div id="file-tree"></div><section id="diff-viewer" hidden><span id="diff-title"></span><button id="diff-close"></button><pre id="diff-content"></pre></section></aside>
       <aside id="run-center-panel" hidden><button class="panel-close"></button><div id="run-list"></div><div id="changeset-list"></div></aside>
       <div id="terminal-host"></div><button id="terminal-toggle"></button><button id="terminal-start"></button><button id="terminal-clear"></button><div id="runtime-status"></div><button id="settings-trigger"></button>
-      <dialog id="settings-dialog"></dialog><select id="provider-mode"><option value="direct">direct</option></select><input id="provider-url" />
-      <input id="model-name" /><input id="api-key" /><div id="model-help"></div><button id="save-model"></button><button id="install-skill"></button>
-      <div id="skill-list"></div><input id="logging-enabled" type="checkbox" /><input id="project-logging-enabled" type="checkbox" />
+      <dialog id="settings-dialog"></dialog><dialog id="plugins-dialog"></dialog><select id="provider-mode"><option value="direct">direct</option></select><input id="provider-url" />
+      <input id="model-name" /><input id="api-key" /><div id="model-help"></div><button id="save-model"></button><button id="quick-test-model"></button><div id="model-probe-status"></div><button id="install-skill"></button>
+      <button id="refresh-project-skills"></button><div id="system-skill-list"></div><div id="user-skill-list"></div><div id="project-skill-list"></div><div id="project-skill-help"></div>
+      <input id="mcp-name" /><input id="mcp-url" /><button id="add-mcp-server"></button><div id="mcp-server-list"></div>
+      <input id="logging-enabled" type="checkbox" /><input id="project-logging-enabled" type="checkbox" />
       <select id="log-level"><option value="debug">debug</option></select><button id="refresh-logs"></button>
       <button id="export-logs"></button><button id="clear-logs"></button><div id="log-list"></div><div id="storage-usage"></div><div id="toast"></div>
       <select id="permission-mode"><option value="confirmWrites">confirmWrites</option></select><input id="project-instructions-enabled" type="checkbox" /><span id="project-instructions-source"></span>

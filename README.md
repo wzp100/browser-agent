@@ -33,7 +33,7 @@ The application uses a BYOK model: your API key stays in the current browser ses
 | 🧠 | **Tool-using agent** | LangGraph orchestrates model calls, typed tools, recovery, and evidence-based completion. |
 | ⚡ | **Browser runtime** | WebContainer provides `jsh`, Node.js, npm, pnpm, and compatible pure-JavaScript packages. |
 | 📄 | **Office generation** | Create and inspect spreadsheets, documents, presentations, and PDFs in the browser. |
-| 🧰 | **Skills** | Built-in and user-installed skills add reusable workflows without coupling them to the agent core. |
+| 🧰 | **Plugins** | Manage system, user, and project Skills plus network-authorized HTTP MCP servers from the main screen. |
 | 💾 | **Durable sessions** | Projects, conversations, permissions, run records, and dependency snapshots recover locally. |
 | 🌐 | **Multiple providers** | OpenAI Responses, DeepSeek Chat Completions, a local gateway, and custom OpenAI-compatible endpoints. |
 | 🛡️ | **Reviewable changes** | Write authorization, file fingerprints, pre-write recovery data, diffs, logs, and run records. |
@@ -70,7 +70,7 @@ See [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for the full data flow 
 
 Open **<https://browser-agent-wzp100-app.pages.dev/>** in a standalone Chrome or Edge window.
 
-1. Select **New task** and grant access to a project folder.
+1. Select **New project** and grant access to a project folder.
 2. Open **Settings**, choose a provider and model, and enter your API key.
 3. Describe the task and review any requested write or execute action.
 4. Start the Runtime when the task needs Node.js, npm, or shell-style tooling.

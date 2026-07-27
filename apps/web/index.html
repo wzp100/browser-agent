@@ -13,7 +13,10 @@
         <aside class="sidebar">
           <div class="sidebar-head">
             <div class="product-name">Browser <span>Agent</span></div>
-            <button id="new-project" class="new-task" type="button"><span>＋</span> 新建任务</button>
+            <div class="sidebar-primary-actions">
+              <button id="new-project" class="new-task" type="button"><span>＋</span> 新建项目</button>
+              <button id="plugins-trigger" class="plugins-button" type="button"><span>◇</span> 插件</button>
+            </div>
           </div>
           <div class="sidebar-section-title">项目</div>
           <nav id="project-list" class="project-list" aria-label="项目和对话">
@@ -31,7 +34,7 @@
         <main class="chat-pane">
           <header class="chat-header">
             <div class="chat-title-block">
-              <strong id="thread-title">新建任务</strong>
+              <strong id="thread-title">新建项目</strong>
               <span id="project-label">选择项目文件夹开始</span>
             </div>
             <div class="connection-control">
@@ -46,7 +49,7 @@
               <div class="empty-icon">✦</div>
               <h1>在浏览器里操作真实项目</h1>
               <strong class="product-subtitle">Browser-native Project Agent</strong>
-              <p>点击左侧“新建任务”并选择一个文件夹。对话、项目关系和目录句柄都会保存在当前浏览器。</p>
+              <p>点击左侧“新建项目”并选择一个文件夹。对话、项目关系和目录句柄都会保存在当前浏览器。</p>
             </section>
             <section id="message-feed" class="message-feed" aria-live="polite"></section>
           </div>
@@ -161,7 +164,11 @@
             <label for="api-key">API Key</label>
             <input id="api-key" type="password" autocomplete="off" placeholder="sk-…" />
             <p id="model-help" class="setting-help"></p>
-            <button id="save-model" class="primary-button" type="button">保存模型配置</button>
+            <div class="setting-actions">
+              <button id="save-model" class="primary-button" type="button">保存模型配置</button>
+              <button id="quick-test-model" type="button">Quick Test</button>
+            </div>
+            <p id="model-probe-status" class="setting-help">尚未测试当前模型。</p>
           </section>
 
           <section class="settings-section">
@@ -171,11 +178,6 @@
               <div><dt>项目目录</dt><dd>与真实文件夹双向同步</dd></div>
               <div><dt>限制</dt><dd>不支持 EXE、PowerShell、原生 Python、Docker</dd></div>
             </dl>
-          </section>
-
-          <section class="settings-section">
-            <div class="section-heading"><h2>Skills</h2><button id="install-skill" type="button">安装 Skill 文件夹</button></div>
-            <div id="skill-list" class="skill-list"></div>
           </section>
 
           <section class="settings-section">
@@ -221,6 +223,50 @@
               <input id="import-local-data-input" type="file" accept="application/json,.json" hidden />
               <button id="import-local-data" type="button">导入项目数据</button>
             </div>
+          </section>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="plugins-dialog" class="settings-dialog plugins-dialog">
+      <form method="dialog" class="settings-shell">
+        <header class="settings-header">
+          <div><strong>插件</strong><span>管理 Skills 与 MCP Server</span></div>
+          <button class="icon-button" value="cancel" aria-label="关闭插件">×</button>
+        </header>
+        <div class="settings-content">
+          <section class="settings-section plugin-intro">
+            <h2>Skills</h2>
+            <p>系统 Skill 提供内置能力，用户 Skill 保存在浏览器中，项目 Skill 从当前项目的 <code>.browser-agent/skills/&lt;name&gt;/SKILL.md</code> 自动发现。同名时按“项目 → 用户 → 系统”生效。</p>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading"><h2>系统 Skills</h2><span class="section-note">随应用提供</span></div>
+            <div id="system-skill-list" class="skill-list"></div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading"><h2>用户 Skills</h2><button id="install-skill" type="button">安装 Skill 文件夹</button></div>
+            <div id="user-skill-list" class="skill-list"></div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading"><h2>项目 Skills</h2><button id="refresh-project-skills" type="button">刷新项目 Skills</button></div>
+            <p id="project-skill-help">连接项目后，将自动读取 .browser-agent/skills。</p>
+            <div id="project-skill-list" class="skill-list"></div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading"><h2>MCP Server</h2><span class="section-note">Streamable HTTP</span></div>
+            <p>添加远程 HTTP MCP Endpoint。连接与每次工具调用都经过当前项目的网络授权；Endpoint 不保存鉴权密钥。</p>
+            <div class="mcp-form">
+              <label for="mcp-name">名称</label>
+              <input id="mcp-name" autocomplete="off" placeholder="例如：团队知识库" />
+              <label for="mcp-url">Endpoint</label>
+              <input id="mcp-url" type="url" autocomplete="url" placeholder="https://example.com/mcp" />
+              <button id="add-mcp-server" class="primary-button" type="button">添加 MCP Server</button>
+            </div>
+            <div id="mcp-server-list" class="mcp-server-list"></div>
           </section>
         </div>
       </form>

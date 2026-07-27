@@ -1,6 +1,6 @@
 import type { AppLogRecord, AppLogSink } from "../../logging/src/index";
 import { BrowserDatabase } from "./database";
-import type { AttachmentRecord, LoggingSettingsRecord, MessageKind, MessageRecord, ModelSettingsRecord, ModelsDevCacheRecord, PersistedDirectoryHandle, ProjectRecord, ProviderProfile, RunRecord, ThreadModelSelection, ThreadRecord } from "./types";
+import type { AttachmentRecord, LoggingSettingsRecord, McpServerRecord, McpSettingsRecord, MessageKind, MessageRecord, ModelProbeRecord, ModelSettingsRecord, ModelsDevCacheRecord, PersistedDirectoryHandle, ProjectRecord, ProviderProfile, RunRecord, ThreadModelSelection, ThreadRecord } from "./types";
 
 export class ProjectRepository {
   constructor(private readonly database: BrowserDatabase) {}
@@ -44,6 +44,8 @@ export class ConversationRepository {
     if (thread) await this.putThread({ ...thread, updatedAt: record.createdAt });
     return record;
   }
+  putMessage(message: MessageRecord): Promise<void> { return this.database.put("messages", message); }
+  deleteMessage(id: string): Promise<void> { return this.database.delete("messages", id); }
   async deleteThread(id: string): Promise<void> {
     await this.database.deleteByIndex("messages", "threadId", id);
     await this.database.deleteByIndex("runs", "threadId", id);
@@ -58,6 +60,15 @@ export class ConversationRepository {
     const thread = await this.getThread(threadId);
     if (!thread) throw new Error(`找不到对话：${threadId}`);
     await this.putThread({ ...thread, modelSelection: selection, modelConfigId: selection.providerProfileId, updatedAt: new Date().toISOString() });
+  }
+}
+
+export class ModelProbeRepository {
+  constructor(private readonly database: BrowserDatabase) {}
+  put(record: ModelProbeRecord): Promise<void> { return this.database.put("modelProbes", record); }
+  async latest(providerProfileId: string, modelId: string): Promise<ModelProbeRecord | undefined> {
+    const records = await this.database.getAllFromIndex<ModelProbeRecord>("modelProbes", "providerModel", [providerProfileId, modelId]);
+    return records.sort((left, right) => right.testedAt.localeCompare(left.testedAt))[0];
   }
 }
 
@@ -115,6 +126,8 @@ export class SettingsRepository {
   putLogging(settings: LoggingSettingsRecord): Promise<void> { return this.database.put("settings", settings); }
   getModelsDevCache(): Promise<ModelsDevCacheRecord | undefined> { return this.database.get<ModelsDevCacheRecord>("settings", "models-dev-cache"); }
   putModelsDevCache(cache: ModelsDevCacheRecord): Promise<void> { return this.database.put("settings", cache); }
+  async getMcpServers(): Promise<McpServerRecord[]> { return (await this.database.get<McpSettingsRecord>("settings", "mcp-servers"))?.servers ?? []; }
+  putMcpServers(servers: McpServerRecord[]): Promise<void> { return this.database.put("settings", { key: "mcp-servers", servers } satisfies McpSettingsRecord); }
   async listProviderProfiles(): Promise<ProviderProfile[]> { return new ProviderProfileRepository(this.database).list(); }
   getProviderProfile(id: string): Promise<ProviderProfile | undefined> { return new ProviderProfileRepository(this.database).get(id); }
   putProviderProfile(profile: ProviderProfile): Promise<void> { return new ProviderProfileRepository(this.database).put(profile); }

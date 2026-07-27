@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import type { AgentEvent } from "../../../packages/agent-kernel/src/index";
 import { chunkContextMessagesForSummary, selectContextMessages } from "../../../packages/context-manager/src/index";
 import { composeLogSinks, configureLogging, flushLogs, logger, type AppLogLevel } from "../../../packages/logging/src/index";
+import { McpHttpClient, registerConfiguredMcpTools, validateMcpUrl } from "../../../packages/mcp-client/src/index";
 import type { ConversationTurn, ModelContentPart, ModelProvider } from "../../../packages/model-adapters/src/index";
 import { canRunAgent, canSendImages } from "../../../packages/model-catalog/src/index";
 import { registerOfficeAgentTools } from "../../../packages/office-pack/src/index";
@@ -15,7 +16,9 @@ import {
   ProjectRepository,
   requestPersistentBrowserStorage,
   SettingsRepository,
+  ModelProbeRepository,
   type MessageKind,
+  type McpServerRecord,
   type MessageRecord,
   type AttachmentRecord,
   type ModelDescriptor,
@@ -33,6 +36,7 @@ import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGEN
 import { AppUi } from "./ui";
 import { ModelSettingsController } from "./model-settings-controller";
 import { createOpenAICompatibleProfile } from "./model-settings";
+import { probeModel } from "./model-probe";
 import { appLocale, readLocalePreference, saveLocalePreference, t, type AppLocalePreference } from "./i18n";
 
 type DirectoryPickerWindow = Window & { showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<BrowserDirectoryHandle> };
@@ -48,6 +52,7 @@ export class BrowserAgentApp {
   private readonly conversations = new ConversationRepository(this.database);
   private readonly attachments = new AttachmentRepository(this.database);
   private readonly settings = new SettingsRepository(this.database);
+  private readonly modelProbes = new ModelProbeRepository(this.database);
   private readonly models = new ModelSettingsController(this.ui, this.settings);
   private readonly logStore = new BrowserLogStore(this.database);
   private readonly skills = new SkillRegistry(new BrowserSkillStore());
@@ -82,6 +87,7 @@ export class BrowserAgentApp {
   private loggingEnabled = true;
   private projectLoggingEnabled = false;
   private terminalCollapsed = true;
+  private mcpServers: McpServerRecord[] = [];
 
   async boot(): Promise<void> {
     const runtimeSupport = inspectWebContainerSupport();
@@ -98,6 +104,8 @@ export class BrowserAgentApp {
     this.bindEvents();
     this.ui.appLanguage.value = readLocalePreference();
     await this.database.open();
+    this.mcpServers = await this.settings.getMcpServers();
+    this.renderMcpManager();
     const loggingSettings = await this.settings.getLogging();
     const loggingLevel = loggingSettings?.level ?? DEFAULT_LOG_LEVEL;
     this.loggingEnabled = loggingSettings?.enabled !== false;
@@ -127,7 +135,13 @@ export class BrowserAgentApp {
   private bindEvents(): void {
     this.ui.setWorkspaceFileOpener((path) => this.openWorkspaceFile(path));
     this.ui.setAttachmentHandler((files) => this.addComposerAttachments(files), (id) => this.removeComposerAttachment(id));
+    this.ui.setQueuedMessageHandler((messageId) => this.withdrawQueuedMessage(messageId));
     this.ui.newProject.addEventListener("click", () => void this.newProject());
+    this.ui.pluginsTrigger.addEventListener("click", () => {
+      this.renderSkillManager();
+      this.renderMcpManager();
+      this.ui.pluginsDialog.showModal();
+    });
     this.ui.send.addEventListener("click", () => void this.send());
     this.ui.stopRun.addEventListener("click", () => this.stopActiveRun());
     this.ui.composerProvider.addEventListener("change", () => void this.changeComposerProvider());
@@ -157,8 +171,11 @@ export class BrowserAgentApp {
     });
     this.ui.providerMode.addEventListener("change", () => this.models.applyProviderDefaults());
     this.ui.saveModel.addEventListener("click", () => void this.models.save(Boolean(this.fileService)));
+    this.ui.quickTestModel.addEventListener("click", () => void this.quickTestModel());
     this.ui.addProvider.addEventListener("click", () => void this.addCompatibleProvider());
     this.ui.installSkill.addEventListener("click", () => void this.installSkillFolder());
+    this.ui.refreshProjectSkills.addEventListener("click", () => void this.loadProjectSkills());
+    this.ui.addMcpServer.addEventListener("click", () => void this.addMcpServer());
     this.ui.logLevel.addEventListener("change", () => void this.changeLogLevel());
     this.ui.loggingEnabled.addEventListener("change", () => void this.changeLoggingSettings());
     this.ui.projectLoggingEnabled.addEventListener("change", () => void this.changeLoggingSettings());
@@ -193,19 +210,25 @@ export class BrowserAgentApp {
 
   private async createThreadRecord(projectId: string): Promise<ThreadRecord> {
     const now = new Date().toISOString();
-    const thread: ThreadRecord = { id: crypto.randomUUID(), projectId, title: "新建任务", modelSelection: this.models.globalSelection, createdAt: now, updatedAt: now };
+    const thread: ThreadRecord = { id: crypto.randomUUID(), projectId, title: "新建项目", modelSelection: this.models.globalSelection, createdAt: now, updatedAt: now };
     await this.conversations.putThread(thread);
     appLog.info("项目对话已创建", { projectId, threadId: thread.id });
     return thread;
   }
 
   private async openThread(threadId: string): Promise<void> {
+    if (this.busy && threadId !== this.activeThread?.id) {
+      this.ui.toast("当前运行结束前不能切换对话；你仍可在当前对话中排队消息。");
+      return;
+    }
     appLog.info("开始恢复对话", { threadId });
     await this.flushTerminalTranscript();
     this.interactiveSession?.kill();
     this.interactiveSession = undefined;
     if (this.activeThread?.projectId !== (await this.conversations.getThread(threadId))?.projectId) await this.mirror.disconnect();
     this.fileService = undefined;
+    this.skills.clearSource("project");
+    this.renderSkillManager();
     await this.clearComposerAttachments();
     this.clearHistoryAttachmentPreviews();
     const thread = await this.conversations.getThread(threadId);
@@ -305,6 +328,7 @@ export class BrowserAgentApp {
     const projectFileCount = entries.filter((entry) => entry.kind === "file" && !isBrowserAgentInternalPath(entry.path)).length;
     appLog.info("真实项目文件服务已连接", { projectId: project.id, projectName: project.name, files: projectFileCount, interruptedChangeSets, browserAgentDirectoriesCreated: createdState || createdPackages || createdInstalledPackages });
     this.fileService = service;
+    await this.loadProjectSkills(service);
     this.configureAppLogging();
     const updated: ProjectRecord = { ...project, permissionHint: "granted", legacyRelinkRequired: false, lastOpenedAt: new Date().toISOString() };
     await this.projects.put(updated);
@@ -320,6 +344,8 @@ export class BrowserAgentApp {
 
   private disconnectUi(label: string, status: "permission" | "missing", action: { label: string; run(): void }): void {
     this.fileService = undefined;
+    this.skills.clearSource("project");
+    this.renderSkillManager();
     this.configureAppLogging();
     this.ui.setConnection(status, label, action);
     this.ui.terminalStart.disabled = true;
@@ -376,10 +402,14 @@ export class BrowserAgentApp {
     }
   }
 
-  private async send(options: { intent?: string; retryOf?: RunRecord; skipUserMessage?: boolean } = {}): Promise<void> {
-    const typedIntent = options.intent?.trim() ?? this.ui.intent.value.trim();
+  private async send(options: { intent?: string; retryOf?: RunRecord; skipUserMessage?: boolean; queuedMessage?: MessageRecord; resumeCheckpoint?: unknown } = {}): Promise<void> {
+    const typedIntent = options.queuedMessage?.content.trim() ?? options.intent?.trim() ?? this.ui.intent.value.trim();
     const intent = typedIntent || (this.composerAttachments.length ? "请分析这些图片。" : "");
-    if (!intent || !this.activeThread || this.busy) return;
+    if (!intent || !this.activeThread) return;
+    if (this.busy) {
+      await this.enqueueComposerMessage(intent);
+      return;
+    }
     if (!this.models.hasConfiguration()) {
       this.ui.modelHelp.textContent = this.models.current.mode === "gateway"
         ? "请检查 Gateway 配置。"
@@ -400,8 +430,10 @@ export class BrowserAgentApp {
       .map((message) => message.id));
     const needsImages = this.composerAttachments.length > 0 || historicalAttachments.some((attachment) => attachment.messageId && activeMessageIds.has(attachment.messageId));
     if (!await this.ensureSelectedModelCapabilities(needsImages)) return;
-    const previousMessages = [...this.activeMessages];
-    const attachmentsForRun = options.skipUserMessage ? [] : this.composerAttachments;
+    const previousMessages = this.activeMessages.filter((message) => message.id !== options.queuedMessage?.id && message.metadata?.queueStatus !== "pending" && message.metadata?.queueStatus !== "running");
+    const attachmentsForRun = options.queuedMessage
+      ? await this.attachments.listForMessage(options.queuedMessage.id)
+      : options.skipUserMessage ? [] : this.composerAttachments;
     const attachmentParts = await Promise.all(attachmentsForRun.map(async (attachment): Promise<ModelContentPart> => ({
       type: "image",
       mimeType: attachment.mimeType,
@@ -411,10 +443,17 @@ export class BrowserAgentApp {
     appLog.info("开始 Agent 回合", { threadId: this.activeThread.id, projectId: this.activeProject?.id, inputCharacters: intent.length, attachments: attachmentParts.length, connected: Boolean(this.fileService) });
     this.ui.intent.value = "";
     this.ui.resizeComposer();
-    const userMessage = options.skipUserMessage ? undefined : await this.appendMessage("user", "user", intent, attachmentParts.length ? {
+    const userMessage = options.queuedMessage ?? (options.skipUserMessage ? undefined : await this.appendMessage("user", "user", intent, attachmentParts.length ? {
       attachments: attachmentsForRun.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size }))
-    } : undefined);
-    if (userMessage) {
+    } : undefined));
+    if (options.queuedMessage) {
+      const index = this.activeMessages.findIndex((message) => message.id === options.queuedMessage?.id);
+      const runningMessage = { ...options.queuedMessage, metadata: { ...(options.queuedMessage.metadata ?? {}), queueStatus: "running" } };
+      if (index >= 0) this.activeMessages[index] = runningMessage;
+      await this.conversations.putMessage(runningMessage);
+      this.ui.renderMessages(this.activeMessages);
+      await this.renderHistoricalAttachments();
+    } else if (userMessage) {
       await Promise.all(attachmentsForRun.map((attachment) => this.attachments.attachToMessage(attachment.id, userMessage.id)));
       const items = attachmentsForRun.map((attachment) => {
         const previewUrl = URL.createObjectURL(attachment.blob);
@@ -423,8 +462,8 @@ export class BrowserAgentApp {
       });
       this.ui.renderMessageAttachments(userMessage.id, items);
     }
-    if (!options.skipUserMessage) await this.clearComposerAttachments(false);
-    if (!options.skipUserMessage && this.activeThread.title === "新建任务") {
+    if (!options.skipUserMessage && !options.queuedMessage) await this.clearComposerAttachments(false);
+    if (!options.skipUserMessage && (this.activeThread.title === "新建任务" || this.activeThread.title === "新建项目")) {
       this.activeThread = { ...this.activeThread, title: intent.slice(0, 42), updatedAt: new Date().toISOString() };
       await this.conversations.putThread(this.activeThread);
       this.ui.setActiveThread(this.activeThread, this.activeProject);
@@ -476,7 +515,9 @@ export class BrowserAgentApp {
         authorizeNetwork: (url) => this.authorizeNetwork(url)
       });
       registerOfficeAgentTools(tools, { workspace: fileService, onWorkspaceWrite });
+      const mcpConnections = await registerConfiguredMcpTools(tools, this.mcpServers, (url) => this.authorizeNetwork(url), controller.signal);
       const projectInstructions = await loadProjectInstructions(fileService, this.activeProject?.instructionsEnabled === true);
+      const resumeCheckpoint = agentKernel.isAgentCheckpoint(options.resumeCheckpoint) ? options.resumeCheckpoint : undefined;
       const result = await new agentKernel.AgentLoop(provider).run({
         intent,
         workspaceId: this.activeProject?.id ?? "project",
@@ -484,6 +525,12 @@ export class BrowserAgentApp {
         conversation: previousConversation,
         ...(attachmentParts.length ? { attachments: attachmentParts } : {}),
         allowImageToolResults: this.selectedModel()?.capabilities.imageInput === "supported",
+        ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
+        onCheckpoint: async (checkpoint) => {
+          run.checkpoint = checkpoint;
+          run.updatedAt = new Date().toISOString();
+          await this.conversations.putRun(run);
+        },
         signal: controller.signal,
         environment: {
           runtime: {
@@ -494,6 +541,7 @@ export class BrowserAgentApp {
             limitations: runtime.limitations?.() ?? ["Runtime 能力信息不可用"]
           },
           skills: this.skills.list(),
+          mcpServers: mcpConnections.map((connection) => ({ name: connection.server.name, toolCount: connection.tools.length })),
           scratchDirectory: browserAgentRunScratchDirectory(run.id),
           ...(projectInstructions ? { projectInstructions } : {})
         }
@@ -512,12 +560,21 @@ export class BrowserAgentApp {
       catch (error) { appLog.error("结束 ChangeSet 失败", { runId: run.id }, error); }
       run.updatedAt = new Date().toISOString();
       await this.conversations.putRun(run);
+      if (options.queuedMessage) {
+        const index = this.activeMessages.findIndex((message) => message.id === options.queuedMessage?.id);
+        if (index >= 0) {
+          const consumed = { ...this.activeMessages[index]!, metadata: { ...(this.activeMessages[index]!.metadata ?? {}), queueStatus: "consumed" } };
+          this.activeMessages[index] = consumed;
+          await this.conversations.putMessage(consumed);
+        }
+      }
       this.activeRunOutputPaths = undefined;
       this.activeRunController = undefined;
       this.busy = false;
       this.ui.setBusy(false, this.fileService ? "模型和项目已就绪" : "项目未连接，文件工具不可用");
       this.updateContextUsage();
       await this.refreshProjectPanels();
+      queueMicrotask(() => { void this.runNextQueuedMessage(); });
     }
   }
 
@@ -529,15 +586,30 @@ export class BrowserAgentApp {
     }
     if (!descriptor) { this.ui.toast("无法取得当前模型的能力信息，请刷新模型列表。 "); return false; }
     const overrides = { ...(this.models.currentProfile.capabilityOverrides?.[descriptor.id] ?? {}) };
+    const probe = await this.modelProbes.latest(this.models.currentProfile.id, descriptor.id);
+    if (probe?.endpointOrigin === safeOrigin(this.models.current.endpoint)) {
+      if (probe.toolCalling) overrides.toolCalling = "supported";
+      if (probe.imageInput) overrides.imageInput = "supported";
+    }
     if (!canRunAgent(descriptor)) {
       if (descriptor.capabilities.toolCalling === "unsupported") { this.ui.toast("当前模型明确不支持工具调用，不能运行项目 Agent。 "); return false; }
-      if (!window.confirm(`模型 ${descriptor.name} 的工具调用能力未知。\n\n只有确认该模型支持工具调用才能继续。是否由你声明支持？`)) return false;
-      overrides.toolCalling = "supported";
+      if (overrides.toolCalling !== "supported") {
+        this.ui.modelProbeStatus.textContent = `模型 ${descriptor.name} 尚未通过工具调用测试。`;
+        if (!this.ui.settingsDialog.open) this.ui.settingsDialog.showModal();
+        this.ui.quickTestModel.focus();
+        this.ui.toast("请先运行 Quick Test，验证工具调用能力。");
+        return false;
+      }
     }
     if (needsImages && !canSendImages(descriptor)) {
       if (descriptor.capabilities.imageInput === "unsupported") { this.ui.toast("当前模型不支持图片输入，请切换模型后重试。 "); return false; }
-      if (!window.confirm(`模型 ${descriptor.name} 的图片输入能力未知。\n\n是否由你声明该模型支持图片输入？`)) return false;
-      overrides.imageInput = "supported";
+      if (overrides.imageInput !== "supported") {
+        this.ui.modelProbeStatus.textContent = `模型 ${descriptor.name} 尚未通过图片输入测试。`;
+        if (!this.ui.settingsDialog.open) this.ui.settingsDialog.showModal();
+        this.ui.quickTestModel.focus();
+        this.ui.toast("请先运行 Quick Test，验证图片输入能力。");
+        return false;
+      }
     }
     if (Object.keys(overrides).length) {
       const profile = {
@@ -550,6 +622,55 @@ export class BrowserAgentApp {
       await this.refreshModelCatalog(false);
     }
     return true;
+  }
+
+  private async quickTestModel(): Promise<void> {
+    if (!this.models.hasConfiguration()) {
+      this.ui.modelProbeStatus.textContent = "请先保存有效的模型配置和 API Key。";
+      return;
+    }
+    this.ui.quickTestModel.disabled = true;
+    this.ui.modelProbeStatus.textContent = "正在测试文本、流式、工具调用和图片输入…";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const provider = await this.models.createProvider();
+      const result = await probeModel(provider, controller.signal);
+      const record = {
+        id: crypto.randomUUID(),
+        providerProfileId: this.models.currentProfile.id,
+        modelId: this.models.current.model,
+        endpointOrigin: safeOrigin(this.models.current.endpoint),
+        text: result.text,
+        toolCalling: result.toolCalling,
+        imageInput: result.imageInput,
+        streaming: result.streaming,
+        testedAt: new Date().toISOString(),
+        details: result.details
+      };
+      await this.modelProbes.put(record);
+      const existing = this.models.currentProfile.capabilityOverrides?.[record.modelId] ?? {};
+      const overrides = {
+        ...existing,
+        ...(result.toolCalling ? { toolCalling: "supported" as const } : {}),
+        ...(result.imageInput ? { imageInput: "supported" as const } : {})
+      };
+      this.models.currentProfile = {
+        ...this.models.currentProfile,
+        capabilityOverrides: { ...(this.models.currentProfile.capabilityOverrides ?? {}), [record.modelId]: overrides },
+        updatedAt: record.testedAt
+      };
+      await this.settings.putProviderProfile(this.models.currentProfile);
+      await this.refreshModelCatalog(false);
+      const label = (value: boolean): string => value ? "通过" : "失败";
+      this.ui.modelProbeStatus.textContent = `文本 ${label(result.text)} · 流式 ${label(result.streaming)} · 工具 ${label(result.toolCalling)} · 图片 ${label(result.imageInput)}`;
+      if (!result.toolCalling) this.ui.toast("Quick Test 未通过工具调用测试；已保留原有能力设置，未自动降级。");
+    } catch (error) {
+      this.ui.modelProbeStatus.textContent = controller.signal.aborted ? "Quick Test 超时。" : `Quick Test 失败：${errorMessage(error)}`;
+    } finally {
+      clearTimeout(timeout);
+      this.ui.quickTestModel.disabled = false;
+    }
   }
 
   private async prepareConversation(provider: ModelProvider, source: MessageRecord[], force: boolean, signal?: AbortSignal): Promise<ConversationTurn[]> {
@@ -738,6 +859,52 @@ export class BrowserAgentApp {
       if (id) this.skills.register(skillFromMarkdown(id, markdown, "builtin"));
     }
     await this.skills.loadPersisted();
+    if (this.fileService) await this.loadProjectSkills(this.fileService);
+    this.renderSkillManager();
+  }
+
+  private async loadProjectSkills(service = this.fileService): Promise<void> {
+    this.skills.clearSource("project");
+    const project = this.activeProject;
+    if (!service || !project) {
+      this.ui.projectSkillHelp.textContent = "连接项目后，将自动读取 .browser-agent/skills。";
+      this.renderSkillManager();
+      return;
+    }
+    let entries: Awaited<ReturnType<ProjectFileService["list"]>> = [];
+    try {
+      if (await service.exists("/.browser-agent/skills")) entries = await service.list("/.browser-agent/skills");
+    } catch (error) {
+      appLog.warn("读取项目 Skills 目录失败", { projectId: project.id }, error);
+    }
+    const manifests = entries.filter((entry) => entry.kind === "file" && /\/SKILL\.md$/i.test(entry.path)).slice(0, 100);
+    let loaded = 0;
+    for (const manifest of manifests) {
+      const directory = manifest.path.slice(0, -"/SKILL.md".length);
+      const folderName = directory.split("/").at(-1) ?? "";
+      const id = folderName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "");
+      if (!id) continue;
+      try {
+        const markdown = (await service.readText(manifest.path)).content;
+        const files: SkillFile[] = [];
+        const resourceEntries = entries
+          .filter((candidate) => candidate.kind === "file" && candidate.path.startsWith(`${directory}/`) && candidate.path !== manifest.path)
+          .slice(0, 100);
+        for (const entry of resourceEntries) {
+          if ((entry.size ?? 0) > 1_000_000) continue;
+          try { files.push({ path: entry.path.slice(directory.length + 1), content: (await service.readText(entry.path)).content }); }
+          catch { /* 二进制或读取失败的项目 Skill 资源不注入模型上下文。 */ }
+        }
+        const enabled = readProjectSkillEnabled(project.id, id);
+        this.skills.register({ ...skillFromMarkdown(id, markdown, "project", files), scopeId: project.id, enabled });
+        loaded += 1;
+      } catch (error) {
+        appLog.warn("项目 Skill 加载失败", { projectId: project.id, path: manifest.path }, error);
+      }
+    }
+    this.ui.projectSkillHelp.textContent = loaded
+      ? `已从当前项目加载 ${loaded} 个 Skill。`
+      : "当前项目未发现 .browser-agent/skills/<name>/SKILL.md。";
     this.renderSkillManager();
   }
 
@@ -751,7 +918,8 @@ export class BrowserAgentApp {
       const skill = skillFromMarkdown(id || `skill-${Date.now()}`, markdown, "user", files);
       const sensitivePermissions = skill.permissions?.filter((permission) => permission === "network" || permission === "workspace-write" || permission === "runtime-execute") ?? [];
       if (sensitivePermissions.length && !window.confirm(`Skill“${skill.name}”声明了以下敏感权限：\n${sensitivePermissions.join("、")}\n\n是否继续安装？`)) return;
-      const existing = this.skills.listAll().some((item) => item.id === skill.id) ? this.skills.inspectInstalled(skill.id) : undefined;
+      const existingSummary = this.skills.listAll().find((item) => item.id === skill.id && item.source === "user");
+      const existing = existingSummary ? this.skills.inspectInstalled(existingSummary.key ?? existingSummary.id) : undefined;
       if (existing) {
         const diff = skillUpdateDiff(existing, skill).slice(0, 12_000);
         if (!window.confirm(`即将更新 Skill“${skill.name}” ${existing.version ?? "未声明版本"} → ${skill.version ?? "未声明版本"}。\n\n权限：${skill.permissions?.join("、") || "无"}\n\n更新 Diff：\n${diff}\n\n是否继续？`)) return;
@@ -780,6 +948,8 @@ export class BrowserAgentApp {
       await this.mirror.disconnect();
       this.clearHistoryAttachmentPreviews();
       this.activeThread = undefined; this.activeProject = undefined; this.activeMessages = []; this.fileService = undefined;
+      this.skills.clearSource("project");
+      this.renderSkillManager();
       this.ui.setActiveThread(undefined, undefined); this.ui.renderMessages([]); this.ui.setConnection("disconnected", "未连接");
     }
     await this.refreshSidebar();
@@ -796,7 +966,12 @@ export class BrowserAgentApp {
   }
 
   private conversationTurns(): ConversationTurn[] {
-    return this.activeMessages.filter((message): message is MessageRecord & { role: "user" | "assistant" } => message.role === "user" || message.role === "assistant").map(({ role, content }) => ({ role, content }));
+    return this.activeMessages
+      .filter((message): message is MessageRecord & { role: "user" | "assistant" } =>
+        (message.role === "user" || message.role === "assistant")
+        && message.metadata?.queueStatus !== "pending"
+        && message.metadata?.queueStatus !== "running")
+      .map(({ role, content }) => ({ role, content }));
   }
 
   private onMirrorEvent(event: MirrorEvent): void {
@@ -868,7 +1043,7 @@ export class BrowserAgentApp {
 
   private async addComposerAttachments(files: File[]): Promise<void> {
     const thread = this.activeThread;
-    if (!thread || this.busy) return;
+    if (!thread) return;
     const accepted = new Set(["image/jpeg", "image/png", "image/webp"]);
     let total = this.composerAttachments.reduce((sum, item) => sum + item.size, 0);
     for (const file of files) {
@@ -890,6 +1065,57 @@ export class BrowserAgentApp {
       total += file.size;
     }
     this.renderComposerAttachments();
+  }
+
+  private async enqueueComposerMessage(intent: string): Promise<void> {
+    const thread = this.activeThread;
+    if (!thread) return;
+    const queuedAttachments = [...this.composerAttachments];
+    const message = await this.appendMessage("user", "user", intent, {
+      queueStatus: "pending",
+      queuedAt: new Date().toISOString(),
+      ...(queuedAttachments.length ? {
+        attachments: queuedAttachments.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size }))
+      } : {})
+    });
+    if (!message) return;
+    await Promise.all(queuedAttachments.map((attachment) => this.attachments.attachToMessage(attachment.id, message.id)));
+    const items = queuedAttachments.map((attachment) => {
+      const previewUrl = URL.createObjectURL(attachment.blob);
+      this.historyAttachmentPreviewUrls.set(attachment.id, previewUrl);
+      return { id: attachment.id, name: attachment.name, size: attachment.size, mimeType: attachment.mimeType, previewUrl };
+    });
+    this.ui.renderMessageAttachments(message.id, items);
+    this.ui.intent.value = "";
+    this.ui.resizeComposer();
+    await this.clearComposerAttachments(false);
+    this.ui.toast("消息已排队；可在消息旁撤回。");
+  }
+
+  private async withdrawQueuedMessage(messageId: string): Promise<void> {
+    const message = this.activeMessages.find((item) => item.id === messageId);
+    if (!message || message.metadata?.queueStatus !== "pending") {
+      this.ui.toast("该消息已开始执行，不能再撤回。");
+      return;
+    }
+    for (const attachment of await this.attachments.listForMessage(message.id)) {
+      await this.attachments.delete(attachment.id);
+      const preview = this.historyAttachmentPreviewUrls.get(attachment.id);
+      if (preview) URL.revokeObjectURL(preview);
+      this.historyAttachmentPreviewUrls.delete(attachment.id);
+    }
+    await this.conversations.deleteMessage(message.id);
+    this.activeMessages = this.activeMessages.filter((item) => item.id !== message.id);
+    this.ui.renderMessages(this.activeMessages);
+    await this.renderHistoricalAttachments();
+    this.ui.toast("已撤回排队消息。");
+  }
+
+  private async runNextQueuedMessage(): Promise<void> {
+    if (this.busy || !this.activeThread || !this.fileService) return;
+    const message = this.activeMessages.find((item) => item.role === "user" && item.metadata?.queueStatus === "pending");
+    if (!message) return;
+    await this.send({ queuedMessage: message, skipUserMessage: true });
   }
 
   private async removeComposerAttachment(id: string): Promise<void> {
@@ -1185,11 +1411,13 @@ export class BrowserAgentApp {
         networkHosts: [...new Set(run.events.flatMap((event) => event.networkHost ? [event.networkHost] : []))],
         changedFiles: [...new Set(changeSet?.changes.flatMap((change) => [change.path, ...(change.targetPath ? [change.targetPath] : [])]) ?? [])],
         createdAt: run.createdAt,
+        canResume: (run.status === "interrupted" || run.status === "failed") && Boolean(run.checkpoint),
         ...(error ? { error } : {})
       };
     }), {
       viewDiff: (runId) => this.showRunDiff(runId),
       restore: async (runId) => { await this.restoreRun(runId); },
+      resume: (runId) => this.resumeRun(runId),
       retry: (runId, mode) => this.retryRun(runId, mode)
     });
     this.ui.renderChangeSets(changeSets.map((changeSet) => ({
@@ -1261,21 +1489,107 @@ export class BrowserAgentApp {
     await this.send({ intent: run.intent, retryOf: run, skipUserMessage: true });
   }
 
+  private async resumeRun(runId: string): Promise<void> {
+    if (!this.activeThread || this.busy) return;
+    const run = (await this.conversations.runs(this.activeThread.id)).find((item) => item.id === runId);
+    if (!run?.checkpoint) return;
+    const { isAgentCheckpoint } = await import("../../../packages/agent-kernel/src/index");
+    if (!isAgentCheckpoint(run.checkpoint)) {
+      this.ui.toast("该运行的检查点无效，不能安全继续。");
+      return;
+    }
+    await this.send({ intent: run.intent, retryOf: run, skipUserMessage: true, resumeCheckpoint: run.checkpoint });
+  }
+
   private renderSkillManager(): void {
-    this.ui.renderSkills(this.skills.listAll(), {
-      inspect: (id) => {
-        const skill = this.skills.inspectInstalled(id);
+    this.ui.renderSkillGroups(this.skills.listAll(), {
+      inspect: (reference) => {
+        const skill = this.skills.inspectInstalled(reference);
         window.alert(`${skill.name}\n版本：${skill.version ?? "未声明"}\n来源：${skill.source}\n权限：${skill.permissions?.join("、") || "无"}\n\n${skill.description}`);
       },
-      setEnabled: async (id, enabled) => { await this.skills.setEnabled(id, enabled); this.renderSkillManager(); },
-      uninstall: async (id) => {
-        const skill = this.skills.inspectInstalled(id);
-        if (skill.source === "builtin") { this.ui.toast("内置 Skill 不能卸载，可选择禁用。 "); return; }
+      setEnabled: async (reference, enabled) => {
+        const skill = this.skills.inspectInstalled(reference);
+        await this.skills.setEnabled(reference, enabled, skill.source !== "project");
+        if (skill.source === "project" && skill.scopeId) saveProjectSkillEnabled(skill.scopeId, skill.id, enabled);
+        this.renderSkillManager();
+      },
+      uninstall: async (reference) => {
+        const skill = this.skills.inspectInstalled(reference);
+        if (skill.source === "builtin" || skill.source === "project") { this.ui.toast("系统和项目 Skill 不能在此卸载，可选择禁用。"); return; }
         if (!window.confirm(`确定卸载 Skill“${skill.name}”吗？`)) return;
-        await this.skills.uninstall(id);
+        await this.skills.uninstall(reference);
         this.renderSkillManager();
       }
     });
+  }
+
+  private renderMcpManager(): void {
+    this.ui.renderMcpServers(this.mcpServers, {
+      test: (id) => this.testMcpServer(id),
+      setEnabled: async (id, enabled) => {
+        this.mcpServers = this.mcpServers.map((server) => server.id === id ? { ...server, enabled, updatedAt: new Date().toISOString() } : server);
+        await this.settings.putMcpServers(this.mcpServers);
+        this.renderMcpManager();
+      },
+      remove: async (id) => {
+        const server = this.mcpServers.find((candidate) => candidate.id === id);
+        if (!server || !window.confirm(`确定移除 MCP Server“${server.name}”吗？`)) return;
+        this.mcpServers = this.mcpServers.filter((candidate) => candidate.id !== id);
+        await this.settings.putMcpServers(this.mcpServers);
+        this.renderMcpManager();
+      }
+    });
+  }
+
+  private async addMcpServer(): Promise<void> {
+    const name = this.ui.mcpName.value.trim();
+    const urlValue = this.ui.mcpUrl.value.trim();
+    if (!name || !urlValue) { this.ui.toast("请填写 MCP Server 名称和 Endpoint。"); return; }
+    let url: URL;
+    try { url = validateMcpUrl(urlValue); }
+    catch (error) { this.ui.toast(errorMessage(error)); return; }
+    if (this.mcpServers.some((server) => server.url === url.href)) { this.ui.toast("该 MCP Endpoint 已经配置。"); return; }
+    const now = new Date().toISOString();
+    const server: McpServerRecord = { id: crypto.randomUUID(), name, url: url.href, enabled: true, createdAt: now, updatedAt: now };
+    this.mcpServers = [...this.mcpServers, server];
+    await this.settings.putMcpServers(this.mcpServers);
+    this.ui.mcpName.value = "";
+    this.ui.mcpUrl.value = "";
+    this.renderMcpManager();
+    this.ui.toast(`已添加 MCP Server：${name}`);
+  }
+
+  private async testMcpServer(id: string): Promise<void> {
+    const server = this.mcpServers.find((candidate) => candidate.id === id);
+    if (!server) return;
+    if (!this.activeProject) { this.ui.toast("请先打开一个项目，再测试 MCP 网络连接。"); return; }
+    const testedAt = new Date().toISOString();
+    try {
+      const tools = await new McpHttpClient(server, (url) => this.authorizeNetwork(url)).listTools();
+      this.mcpServers = this.mcpServers.map((candidate) => {
+        if (candidate.id !== id) return candidate;
+        const { lastError: _lastError, ...rest } = candidate;
+        return {
+          ...rest,
+          lastTestedAt: testedAt,
+          lastToolCount: tools.length,
+          cachedTools: tools.map((tool) => ({
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            inputSchema: tool.inputSchema as unknown as Record<string, unknown>
+          })),
+          updatedAt: testedAt
+        };
+      });
+      this.ui.toast(`MCP 连接正常：发现 ${tools.length} 个工具。`);
+    } catch (error) {
+      this.mcpServers = this.mcpServers.map((candidate) => candidate.id === id
+        ? { ...candidate, lastTestedAt: testedAt, lastError: errorMessage(error).slice(0, 500), updatedAt: testedAt }
+        : candidate);
+      this.ui.toast(`MCP 测试失败：${errorMessage(error)}`);
+    }
+    await this.settings.putMcpServers(this.mcpServers);
+    this.renderMcpManager();
   }
 
   private async exportProjectData(): Promise<void> {
@@ -1295,7 +1609,9 @@ export class BrowserAgentApp {
       runs,
       providerProfiles: this.models.profiles,
       models: this.availableModels,
-      skills: this.skills.listAll().map((skill) => this.skills.inspectInstalled(skill.id)),
+      skills: this.skills.listAll()
+        .filter((skill) => skill.source !== "project")
+        .map((skill) => this.skills.inspectInstalled(skill.key ?? skill.id)),
       changeSets: await service.listChangeSets(),
       recoveryBackups: await service.exportRecoveryBackups(),
       attachments
@@ -1415,6 +1731,15 @@ function mimeTypeForPath(path: string): string {
 function formatBytes(value: number): string { if (value < 1024) return `${value} B`; if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`; if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`; return `${(value / 1024 ** 3).toFixed(1)} GB`; }
 function isLogLevel(value: string): value is AppLogLevel { return value === "trace" || value === "debug" || value === "info" || value === "warn" || value === "error"; }
 function safeOrigin(value: string): string { try { return new URL(value).origin; } catch { return "invalid-url"; } }
+function projectSkillStateKey(projectId: string, skillId: string): string { return `browser-agent-runtime:project-skill:${projectId}:${skillId}`; }
+function readProjectSkillEnabled(projectId: string, skillId: string): boolean {
+  try { return localStorage.getItem(projectSkillStateKey(projectId, skillId)) !== "disabled"; }
+  catch { return true; }
+}
+function saveProjectSkillEnabled(projectId: string, skillId: string, enabled: boolean): void {
+  try { localStorage.setItem(projectSkillStateKey(projectId, skillId), enabled ? "enabled" : "disabled"); }
+  catch { /* 浏览器禁用本地存储时，项目 Skill 状态仅保留到当前页面。 */ }
+}
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = "";

@@ -7,17 +7,39 @@ import type { ScriptRuntimeProvider } from "../../runtime-contracts/src/index";
 import { skillFromMarkdown, type SkillRegistry } from "../../skill-core/src/index";
 import { BROWSER_AGENT_PACKAGE_DIRECTORY, isBrowserAgentPackagePath, normalizeAgentWorkspacePath, type ProjectFileService } from "../../workspace-contracts/src/index";
 import { buildSystemPrompt, type AgentEnvironmentSnapshot } from "./prompt";
+import { ToolLoopDetector } from "./tool-loop-detector";
 
 const agentLog = logger("agent.kernel");
 const DEFAULT_MAX_TURNS = 40;
 const MAX_CONSECUTIVE_TOOL_FAILURES = 2;
 const MAX_UNGROUNDED_RESPONSES = 2;
 
-type CompletionRequirement = "conversational" | "grounded" | "workspace-write";
-interface ToolEvidence { callId: string; toolName: string; effect: AgentToolDefinition["effect"]; scope: AgentToolDefinition["scope"]; }
+export type CompletionRequirement = "conversational" | "grounded" | "workspace-write";
+export interface ToolEvidence { callId: string; toolName: string; effect: AgentToolDefinition["effect"]; scope: AgentToolDefinition["scope"]; }
+export interface AgentCheckpoint {
+  version: 1;
+  stage: "after-tools";
+  turn: number;
+  requiredEvidence: CompletionRequirement;
+  messages: AgentModelMessage[];
+  evidence: ToolEvidence[];
+  updatedAt: string;
+}
 
 export interface AgentEvent { kind: "phase" | "tool-start" | "tool-result" | "assistant-delta" | "assistant" | "error"; phase?: TaskPhase; content: string; toolName?: string; metadata?: Record<string, unknown>; }
-export interface RunRequest { intent: string; workspaceId: string; tools: AgentToolRegistry; conversation?: ConversationTurn[]; attachments?: ModelContentPart[]; allowImageToolResults?: boolean; maxTurns?: number; environment?: AgentEnvironmentSnapshot; signal?: AbortSignal; }
+export interface RunRequest {
+  intent: string;
+  workspaceId: string;
+  tools: AgentToolRegistry;
+  conversation?: ConversationTurn[];
+  attachments?: ModelContentPart[];
+  allowImageToolResults?: boolean;
+  maxTurns?: number;
+  environment?: AgentEnvironmentSnapshot;
+  resumeCheckpoint?: AgentCheckpoint;
+  onCheckpoint?: (checkpoint: AgentCheckpoint) => void | Promise<void>;
+  signal?: AbortSignal;
+}
 export interface RunResult { task: TaskState; reply: string; }
 
 const AgentGraphState = Annotation.Root({
@@ -37,13 +59,15 @@ export class AgentLoop {
     const now = new Date().toISOString();
     const task: TaskState = { taskId: crypto.randomUUID(), sessionId: crypto.randomUUID(), workspaceId: request.workspaceId, phase: "CREATED", userIntent: request.intent, activeSkills: [], workingDirectory: "/workspace", observations: [], createdAt: now, updatedAt: now };
     agentLog.info("Agent 任务开始", { taskId: task.taskId, workspaceId: request.workspaceId, inputCharacters: request.intent.length, maxTurns: request.maxTurns ?? DEFAULT_MAX_TURNS });
-    const messages: AgentModelMessage[] = [
+    const freshMessages: AgentModelMessage[] = [
       { role: "system", content: buildSystemPrompt(request.environment) },
       ...(request.conversation ?? []),
       { role: "user", content: request.attachments?.length ? [{ type: "text", text: request.intent }, ...request.attachments] : request.intent }
     ];
-    const evidence: ToolEvidence[] = [];
-    const initialRequirement = inferCompletionRequirement(request.intent);
+    const checkpoint = request.resumeCheckpoint;
+    const messages = checkpoint ? checkpoint.messages : freshMessages;
+    const evidence: ToolEvidence[] = checkpoint ? [...checkpoint.evidence] : [];
+    const initialRequirement = checkpoint?.requiredEvidence ?? inferCompletionRequirement(request.intent);
     let ungroundedResponses = 0;
     const setPhase = async (phase: TaskPhase, content: string): Promise<void> => { task.phase = phase; task.updatedAt = new Date().toISOString(); task.observations.push(content); await observe({ kind: "phase", phase, content }); };
     const tools = toolsForRequirement(request.tools.list(), initialRequirement);
@@ -51,6 +75,7 @@ export class AgentLoop {
     const modelTools = tools.map(({ id, description, inputSchema }) => ({ id, description, inputSchema }));
     const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
     let consecutiveToolFailures = 0;
+    const loopDetector = new ToolLoopDetector();
     try {
       await setPhase("INITIALIZING", "已恢复项目上下文并准备按需工具。 ");
       await setPhase("DISCOVERING", `发现 ${tools.length} 个可执行工具。`);
@@ -63,8 +88,15 @@ export class AgentLoop {
         await setPhase("RUNNING", `Agent 正在执行第 ${turn + 1} 轮。`);
         let response: ModelTurnResponse;
         try {
-          const toolChoice = state.requiredEvidence === "conversational" ? "none" : requirementSatisfied(state.requiredEvidence, evidence) ? "auto" : "required";
-          response = await this.model.runTurn({ messages: state.messages, tools: modelTools, toolChoice }, undefined, request.signal);
+          const conversationalStream = state.requiredEvidence === "conversational";
+          const toolChoice = conversationalStream ? "none" : requirementSatisfied(state.requiredEvidence, evidence) ? "auto" : "required";
+          response = await this.model.runTurn(
+            { messages: state.messages, tools: modelTools, toolChoice },
+            conversationalStream
+              ? (delta) => observe({ kind: "assistant-delta", content: delta, metadata: { turn, streamed: true } })
+              : undefined,
+            request.signal
+          );
         } catch (error) {
           throw error;
         }
@@ -84,7 +116,7 @@ export class AgentLoop {
           completionIssue = completionValidationIssue(responseText, requiredEvidence, evidence);
           completionAllowed = !completionIssue;
           if (completionAllowed) {
-            await observe({ kind: "assistant-delta", content: responseText, metadata: { turn, validated: true } });
+            if (state.requiredEvidence !== "conversational") await observe({ kind: "assistant-delta", content: responseText, metadata: { turn, validated: true } });
             await observe({ kind: "assistant", content: responseText, metadata: { turn, final: true, validated: true, evidence: evidence.map((item) => item.callId) } });
           } else {
             agentLog.warn("Agent 候选答复缺少可验证证据，已阻止展示", { taskId: task.taskId, turn: turn + 1, completionIssue, requiredEvidence, evidence: evidence.length });
@@ -110,6 +142,12 @@ export class AgentLoop {
               ? { ...(normalizedResult.serializable as Record<string, unknown>), imageForwardedToModel: request.allowImageToolResults === true }
               : normalizedResult.serializable;
             toolContent = truncate(JSON.stringify(serializableResult));
+            const loopObservation = loopDetector.inspect(call.name, call.arguments, toolContent);
+            if (loopObservation.blocked) throw new Error(loopObservation.blocked);
+            if (loopObservation.warning) {
+              toolContent = `${toolContent}\n\n[运行时防护] ${loopObservation.warning}`;
+              task.observations.push(loopObservation.warning);
+            }
             if (normalizedResult.parts.length && request.allowImageToolResults) {
               visualMessages.push({ role: "user", content: [
                 { type: "text", text: `以下图片由工具 ${call.name} 刚刚生成，用于继续视觉分析。` },
@@ -130,6 +168,16 @@ export class AgentLoop {
           }
           toolMessages.push({ role: "tool", name: call.name, toolCallId: call.id, content: toolContent });
         }
+        const checkpointMessages = [...state.messages, ...toolMessages, ...visualMessages];
+        await request.onCheckpoint?.({
+          version: 1,
+          stage: "after-tools",
+          turn: state.turn,
+          requiredEvidence: state.requiredEvidence,
+          messages: checkpointMessages,
+          evidence: [...evidence],
+          updatedAt: new Date().toISOString()
+        });
         return { messages: [...toolMessages, ...visualMessages] };
       };
 
@@ -166,7 +214,7 @@ export class AgentLoop {
         .addEdge("finalize", END)
         .compile({ name: "browser-agent-loop" });
       const result = await graph.invoke(
-        { messages, turn: 0, responseText: "", toolCalls: [], completionAllowed: false, completionIssue: "", requiredEvidence: initialRequirement, reply: "" },
+        { messages, turn: checkpoint?.turn ?? 0, responseText: "", toolCalls: [], completionAllowed: false, completionIssue: "", requiredEvidence: initialRequirement, reply: "" },
         { recursionLimit: Math.max(25, maxTurns * 3 + 5) }
       );
       agentLog.info("Agent 任务完成", { taskId: task.taskId, phase: task.phase });
@@ -182,6 +230,39 @@ export class AgentLoop {
       return { task, reply };
     }
   }
+}
+
+export function isAgentCheckpoint(value: unknown): value is AgentCheckpoint {
+  if (!value || typeof value !== "object") return false;
+  const checkpoint = value as Partial<AgentCheckpoint>;
+  return checkpoint.version === 1
+    && checkpoint.stage === "after-tools"
+    && typeof checkpoint.turn === "number"
+    && Number.isInteger(checkpoint.turn)
+    && checkpoint.turn >= 0
+    && (checkpoint.requiredEvidence === "conversational" || checkpoint.requiredEvidence === "grounded" || checkpoint.requiredEvidence === "workspace-write")
+    && Array.isArray(checkpoint.messages)
+    && checkpoint.messages.every(isCheckpointMessage)
+    && Array.isArray(checkpoint.evidence)
+    && checkpoint.evidence.every((item) => Boolean(item && typeof item === "object"
+      && typeof (item as ToolEvidence).callId === "string"
+      && typeof (item as ToolEvidence).toolName === "string"
+      && ["context", "read", "write", "execute"].includes((item as ToolEvidence).effect)
+      && ["workspace", "runtime", "network", "conversation", "skill"].includes((item as ToolEvidence).scope)))
+    && typeof checkpoint.updatedAt === "string";
+}
+
+function isCheckpointMessage(value: unknown): value is AgentModelMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<AgentModelMessage>;
+  if (!message.role || !["system", "user", "assistant", "tool"].includes(message.role)) return false;
+  if (typeof message.content === "string") return true;
+  if (!Array.isArray(message.content)) return false;
+  return message.content.every((part) => Boolean(part && typeof part === "object"
+    && (((part as ModelContentPart).type === "text" && typeof (part as Extract<ModelContentPart, { type: "text" }>).text === "string")
+      || ((part as ModelContentPart).type === "image"
+        && ["image/jpeg", "image/png", "image/webp"].includes((part as Extract<ModelContentPart, { type: "image" }>).mimeType)
+        && typeof (part as Extract<ModelContentPart, { type: "image" }>).data === "string"))));
 }
 
 export interface CoreToolOptions {

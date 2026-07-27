@@ -79,6 +79,38 @@ test("模型切换、图片发送与成功运行自动折叠", async ({ page }) 
   expect(user.content.some((part) => part.type === "image" && part.mimeType === "image/png")).toBe(true);
 });
 
+test("插件入口管理系统、用户、项目 Skills 与 MCP 配置", async ({ page }) => {
+  await expect(page.locator("#new-project")).toContainText("新建项目");
+  await page.locator("#settings-trigger").click();
+  await expect(page.locator("#settings-dialog h2", { hasText: "Skills" })).toHaveCount(0);
+  await page.locator("#settings-dialog button[aria-label='关闭']").click();
+
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const project = await root.getDirectoryHandle("browser-agent-e2e");
+    const home = await project.getDirectoryHandle(".browser-agent", { create: true });
+    const skills = await home.getDirectoryHandle("skills", { create: true });
+    const folder = await skills.getDirectoryHandle("project-e2e", { create: true });
+    const handle = await folder.getFileHandle("SKILL.md", { create: true });
+    const writer = await handle.createWritable();
+    await writer.write("---\nname: project-e2e\ndescription: 项目 E2E Skill\n---\n# Project E2E\n");
+    await writer.close();
+  });
+
+  await page.locator("#plugins-trigger").click();
+  await expect(page.locator("#system-skill-list .skill-item").first()).toBeVisible();
+  await expect(page.locator("#user-skill-list")).toContainText("尚未添加用户 Skill");
+  await page.locator("#refresh-project-skills").click();
+  await expect(page.locator("#project-skill-list")).toContainText("project-e2e");
+  await expect(page.locator("#project-skill-list")).toContainText("项目 E2E Skill");
+
+  await page.locator("#mcp-name").fill("E2E MCP");
+  await page.locator("#mcp-url").fill("https://mcp.example.test/mcp");
+  await page.locator("#add-mcp-server").click();
+  await expect(page.locator("#mcp-server-list")).toContainText("E2E MCP");
+  await expect(page.locator("#mcp-server-list")).toContainText("尚未测试");
+});
+
 test("失败运行保持展开，停止运行记录为 cancelled", async ({ page }) => {
   page.on("dialog", (dialog) => dialog.accept());
   await page.locator("#intent").fill("[E2E:FAIL] 触发可重复的工具失败。");

@@ -31,6 +31,24 @@ export interface ContextSummaryChunk {
   completedMessages: number;
 }
 
+export interface AgentTaskCompactionState {
+  goal: string;
+  completedWork: string[];
+  changedFiles: string[];
+  completedToolCallIds: string[];
+  runtimeErrors: string[];
+  steering: string[];
+  remainingWork: string[];
+  nextStep: string;
+}
+
+export interface ToolRoundMessageLike {
+  content: unknown;
+  role?: string;
+  toolCalls?: Array<{ id?: string }>;
+  toolCallId?: string;
+}
+
 /** 对未知模型使用 32k，避免未发现模型能力时把无限历史送入请求。 */
 export function resolveContextWindow(contextWindow?: number): number {
   return contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0
@@ -123,6 +141,62 @@ export function chunkContextMessagesForSummary<T>(
   }
   flush();
   return chunks;
+}
+
+/** 生成任务内压缩的稳定摘要骨架，确保恢复所需事实不会被自由摘要遗漏。 */
+export function formatAgentTaskCompactionState(state: AgentTaskCompactionState): string {
+  const section = (title: string, values: readonly string[]): string => `${title}：\n${values.length ? values.map((value) => `- ${value}`).join("\n") : "- 无"}`;
+  return [
+    `目标：${state.goal}`,
+    section("已完成", state.completedWork),
+    section("累计文件", [...new Set(state.changedFiles)]),
+    section("成功 callId", [...new Set(state.completedToolCallIds)]),
+    section("Runtime 错误", state.runtimeErrors),
+    section("用户 Steering", state.steering),
+    section("剩余任务", state.remainingWork),
+    `下一步：${state.nextStep}`
+  ].join("\n\n");
+}
+
+/**
+ * 在给定预算下从后向前保留完整消息组。assistant toolCalls 与其后连续 tool 结果视为
+ * 一个不可拆分回合，避免压缩留下悬空调用或孤立结果。
+ */
+export function selectCompleteToolRounds<T extends ToolRoundMessageLike>(messages: readonly T[], tokenBudget: number, estimate: (message: T) => number = estimateToolRoundMessageTokens): { retainedMessages: T[]; messagesToSummarize: T[] } {
+  const groups: T[][] = [];
+  for (let index = 0; index < messages.length;) {
+    const message = messages[index]!;
+    const group = [message];
+    index += 1;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      const pending = new Set(message.toolCalls.flatMap((call) => call.id ? [call.id] : []));
+      while (index < messages.length && messages[index]!.role === "tool") {
+        const toolMessage = messages[index]!;
+        group.push(toolMessage);
+        if (toolMessage.toolCallId) pending.delete(toolMessage.toolCallId);
+        index += 1;
+        if (!pending.size && messages[index]?.role !== "tool") break;
+      }
+    }
+    groups.push(group);
+  }
+  const budget = Math.max(0, Math.floor(tokenBudget));
+  let retainedTokens = 0;
+  let firstRetainedGroup = groups.length;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const groupTokens = groups[index]!.reduce((sum, message) => sum + Math.max(0, Math.ceil(estimate(message))), 0);
+    if (firstRetainedGroup < groups.length && retainedTokens + groupTokens > budget) break;
+    retainedTokens += groupTokens;
+    firstRetainedGroup = index;
+  }
+  return {
+    messagesToSummarize: groups.slice(0, firstRetainedGroup).flat(),
+    retainedMessages: groups.slice(firstRetainedGroup).flat()
+  };
+}
+
+function estimateToolRoundMessageTokens(message: ToolRoundMessageLike): number {
+  return estimateTextTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)) + 4;
 }
 
 function validRatio(value: number | undefined): value is number { return value !== undefined && Number.isFinite(value) && value > 0 && value <= 1; }

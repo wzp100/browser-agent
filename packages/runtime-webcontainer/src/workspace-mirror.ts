@@ -1,13 +1,15 @@
 import type { FileSystemTree, IFSWatcher, WebContainer, WebContainerProcess } from "@webcontainer/api";
-import { logger } from "../../logging/src/index";
+import { logger, serializeError, type SerializedError } from "../../logging/src/index";
 import type { InteractiveRuntimeSession, RuntimeSession, ScriptExecutionRequest, ScriptExecutionResult, ScriptRuntimeProvider, TerminalDimensions } from "../../runtime-contracts/src/index";
 import { BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY, BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, BROWSER_AGENT_PACKAGE_DIRECTORY, isBrowserAgentPackagePath, isRuntimeIgnoredPath, ProjectFileService, type ProjectFileEntry } from "../../workspace-contracts/src/index";
-import { runtimeCwd, runtimeFsPath } from "./paths";
+import { toContainerFsPath, toProcessRelativePath, toSpawnWorkingDirectory } from "./paths";
 import { isDependencyMutationCommand, isRuntimeNodeModulesPath, runtimePackageEnvironment } from "./package-cache";
 import { decodeDependencySnapshot, encodeDependencySnapshot } from "./dependency-snapshot";
+import { DependencySnapshotCoordinator, type DependencySnapshotFailure, type DependencySnapshotState } from "./dependency-snapshot-state";
 import { inspectWebContainerSupport } from "./support";
 
 const runtimeLog = logger("runtime.webcontainer");
+export const RUNTIME_TEMP_DIRECTORY = "/.browser-agent/runtime-tmp";
 
 interface SharedWebContainerState {
   container?: WebContainer;
@@ -18,9 +20,12 @@ interface SharedWebContainerState {
 type RuntimeGlobal = typeof globalThis & { __agentCodexWebContainer?: SharedWebContainerState };
 
 export interface MirrorEvent {
-  kind: "boot" | "sync" | "conflict" | "error";
+  kind: "boot" | "sync" | "conflict" | "error" | "diagnostic";
   message: string;
   path?: string;
+  severity?: "warning" | "error";
+  code?: string;
+  error?: SerializedError;
 }
 
 export type MirrorEventHandler = (event: MirrorEvent) => void;
@@ -31,19 +36,23 @@ export class WorkspaceMirror {
   private watcher: IFSWatcher | undefined;
   private readonly suppressed = new Map<string, number>();
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly activeRuntimeSyncs = new Set<Promise<void>>();
+  private readonly activeRuntimeSyncs = new Map<string, Promise<void>>();
   private shell: WebContainerProcess | undefined;
   private shellWriter: WritableStreamDefaultWriter<string> | undefined;
   private connectPromise: Promise<void> | undefined;
   private connectingProjectId: string | undefined;
-  private dependencySnapshotTimer: ReturnType<typeof setTimeout> | undefined;
-  private dependencySnapshotDirty = false;
-  private dependencySnapshotPromise: Promise<void> | undefined;
+  private readonly dependencySnapshots: DependencySnapshotCoordinator;
 
-  constructor(private readonly onEvent?: MirrorEventHandler) {}
+  constructor(private readonly onEvent?: MirrorEventHandler) {
+    this.dependencySnapshots = new DependencySnapshotCoordinator(
+      () => this.saveDependencySnapshot(),
+      (failure) => this.reportDependencySnapshotFailure(failure)
+    );
+  }
 
   get ready(): boolean { return Boolean(this.container && this.fileService); }
-  get workingDirectory(): string { return "/workspace"; }
+  get workingDirectory(): "." { return "."; }
+  get snapshotState(): DependencySnapshotState { return this.dependencySnapshots.state; }
 
   async connect(fileService: ProjectFileService): Promise<void> {
     if (this.ready && this.fileService?.projectId === fileService.projectId) {
@@ -80,7 +89,7 @@ export class WorkspaceMirror {
     }
     this.fileService = fileService;
     const entries = await fileService.captureBaseline();
-    const projectFileCount = entries.filter((entry) => entry.kind === "file" && !isBrowserAgentPackagePath(entry.path)).length;
+    const projectFileCount = entries.filter((entry) => entry.kind === "file" && !isBrowserAgentPackagePath(entry.path) && shouldMirrorPath(entry.path)).length;
     const tree = await buildFileSystemTree(fileService, entries);
     insertDirectory(tree, BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY);
     await clearRuntimeWorkspace(this.container);
@@ -97,17 +106,10 @@ export class WorkspaceMirror {
       const relative = String(filename).replace(/\\/g, "/").replace(this.container?.workdir ?? "", "").replace(/^\/+/, "");
       if (!relative) return;
       const path = `/${relative}`;
-      if (isRuntimeNodeModulesPath(path)) { this.scheduleDependencySnapshot(); return; }
-      if (isRuntimeIgnoredPath(path) || this.isSuppressed(path)) return;
+      if (isRuntimeNodeModulesPath(path)) { this.dependencySnapshots.markDirty(); return; }
+      if (isRuntimeMirrorIgnoredPath(path) || this.isSuppressed(path)) return;
       runtimeLog.debug("检测到 Runtime 文件事件", { event: _event, path });
-      const previous = this.pending.get(path);
-      if (previous) clearTimeout(previous);
-      this.pending.set(path, setTimeout(() => {
-        this.pending.delete(path);
-        void this.trackRuntimeSync(path).catch((error) => {
-          runtimeLog.error("Runtime 文件事件写回失败", { path }, error);
-        });
-      }, 160));
+      this.scheduleRuntimeSync(path);
     });
     this.onEvent?.({ kind: "boot", message: `Runtime 已连接 ${projectFileCount} 个项目文件；已安装依赖可跨终端复用。` });
   }
@@ -119,25 +121,26 @@ export class WorkspaceMirror {
   async syncExternalChanges(): Promise<number> {
     if (!this.fileService || !this.container) return 0;
     const changes = await this.fileService.refresh();
-    for (const change of changes) {
+    const projectChanges = changes.filter((change) => !isRuntimeTemporaryPath(change.path));
+    for (const change of projectChanges) {
       try {
-        if (change.type === "delete") await this.container.fs.rm(runtimeFsPath(change.path), { recursive: true, force: true });
+        if (change.type === "delete") await this.container.fs.rm(toContainerFsPath(change.path), { recursive: true, force: true });
         else await this.syncHostPath(change.path);
       } catch (error) {
         runtimeLog.error("外部变更同步到 Runtime 失败", { projectId: this.fileService.projectId, path: change.path, changeType: change.type }, error);
         this.onEvent?.({ kind: "error", path: change.path, message: errorMessage(error) });
       }
     }
-    if (changes.length) {
-      runtimeLog.info("外部变更已同步到 Runtime", { projectId: this.fileService.projectId, changes: changes.length });
-      this.onEvent?.({ kind: "sync", message: `已从真实目录同步 ${changes.length} 项外部变更。` });
+    if (projectChanges.length) {
+      runtimeLog.info("外部变更已同步到 Runtime", { projectId: this.fileService.projectId, changes: projectChanges.length });
+      this.onEvent?.({ kind: "sync", message: `已从真实目录同步 ${projectChanges.length} 项外部变更。` });
     }
-    return changes.length;
+    return projectChanges.length;
   }
 
   async syncHostPath(path: string): Promise<void> {
-    if (!this.fileService || !this.container || isRuntimeIgnoredPath(path)) return;
-    const target = runtimeFsPath(path);
+    if (!this.fileService || !this.container || isRuntimeMirrorIgnoredPath(path)) return;
+    const target = toContainerFsPath(path);
     this.suppress(path);
     try {
       const result = await this.fileService.read(path);
@@ -155,72 +158,86 @@ export class WorkspaceMirror {
     if (!this.fileService || !this.container) return;
     if (settleMilliseconds > 0) await new Promise<void>((resolve) => setTimeout(resolve, settleMilliseconds));
     while (this.pending.size || this.activeRuntimeSyncs.size) {
-      const paths = [...this.pending.keys()];
+      for (const [path, timeout] of this.pending) {
+        if (isRuntimeMirrorIgnoredPath(path)) {
+          clearTimeout(timeout);
+          this.pending.delete(path);
+        }
+      }
+      const paths = coalesceRuntimeSyncPaths([...this.pending.keys()]);
       for (const path of paths) {
         const timeout = this.pending.get(path);
         if (timeout) clearTimeout(timeout);
         this.pending.delete(path);
       }
+      for (const [path, timeout] of this.pending) {
+        if (paths.some((parent) => isSameOrDescendantPath(path, parent))) {
+          clearTimeout(timeout);
+          this.pending.delete(path);
+        }
+      }
       const scheduled = paths.map((path) => this.trackRuntimeSync(path));
-      await Promise.all([...this.activeRuntimeSyncs, ...scheduled]);
+      await Promise.all([...this.activeRuntimeSyncs.values(), ...scheduled]);
     }
   }
 
-  async execute(request: ScriptExecutionRequest): Promise<ScriptExecutionResult> {
+  async execute(request: ScriptExecutionRequest, runtimeRunId: string = crypto.randomUUID()): Promise<ScriptExecutionResult> {
     request.signal?.throwIfAborted();
     const container = this.requireContainer();
     let command: string;
     let args: string[];
-    if (request.kind === "javascript") {
-      const tempDirectory = runtimeFsPath(request.scratchDirectory ?? "/.browser-agent/state/runs/runtime/scratch");
-      const script = `${tempDirectory}/${crypto.randomUUID()}.mjs`;
-      await container.fs.mkdir(tempDirectory, { recursive: true });
-      await container.fs.writeFile(script, request.source);
-      command = "node";
-      args = [script];
-    } else {
-      command = "jsh";
-      args = ["-c", request.source];
-    }
-    const cwd = runtimeCwd(request.workingDirectory);
-    runtimeLog.info("启动 Runtime 命令", { kind: request.kind, command, argumentCount: args.length, cwd });
-    const process = await container.spawn(command, args, { cwd, env: runtimePackageEnvironment(container.workdir) });
-    let stdout = "";
-    const output = process.output.pipeTo(new WritableStream({ write(chunk) { stdout += chunk; } }));
-    const timeoutMs = Math.min(Math.max(request.timeoutMs ?? 120_000, 1_000), 600_000);
+    let scriptFsPath: string | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => {
-        process.kill();
-        reject(new Error(`Runtime 命令超过 ${Math.ceil(timeoutMs / 1000)} 秒，已终止。`));
-      }, timeoutMs);
-    });
-    const aborted = new Promise<never>((_resolve, reject) => {
-      request.signal?.addEventListener("abort", () => {
-        process.kill();
-        reject(request.signal?.reason instanceof Error ? request.signal.reason : new DOMException("运行已取消。", "AbortError"));
-      }, { once: true });
-    });
-    let exitCode: number;
+    let abortHandler: (() => void) | undefined;
     try {
-      exitCode = await Promise.race([Promise.all([process.exit, output]).then(([code]) => code), timedOut, aborted]);
+      if (request.kind === "javascript") {
+        const paths = runtimeScriptPaths(runtimeRunId, crypto.randomUUID());
+        scriptFsPath = paths.fsPath;
+        await container.fs.mkdir(paths.fsDirectory, { recursive: true });
+        await container.fs.writeFile(paths.fsPath, request.source);
+        command = "node";
+        args = [paths.processPath];
+      } else {
+        command = "jsh";
+        args = ["-c", request.source];
+      }
+      const cwd = request.kind === "javascript" ? "." : toSpawnWorkingDirectory(request.workingDirectory);
+      runtimeLog.info("启动 Runtime 命令", { kind: request.kind, command, argumentCount: args.length, cwd });
+      const process = await container.spawn(command, args, { cwd, env: runtimePackageEnvironment(container.workdir) });
+      let stdout = "";
+      const output = process.output.pipeTo(new WritableStream({ write(chunk) { stdout += chunk; } }));
+      const timeoutMs = Math.min(Math.max(request.timeoutMs ?? 120_000, 1_000), 600_000);
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          process.kill();
+          reject(new Error(`Runtime 命令超过 ${Math.ceil(timeoutMs / 1000)} 秒，已终止。`));
+        }, timeoutMs);
+      });
+      const aborted = new Promise<never>((_resolve, reject) => {
+        abortHandler = () => {
+          process.kill();
+          reject(request.signal?.reason instanceof Error ? request.signal.reason : new DOMException("运行已取消。", "AbortError"));
+        };
+        request.signal?.addEventListener("abort", abortHandler, { once: true });
+      });
+      const exitCode = await Promise.race([Promise.all([process.exit, output]).then(([code]) => code), timedOut, aborted]);
+      runtimeLog.info("Runtime 命令结束", { kind: request.kind, command, exitCode, outputBytes: stdout.length });
+      return { exitCode, stdout, stderr: exitCode === 0 ? "" : stdout };
     } finally {
       if (timeout) clearTimeout(timeout);
-      await this.flushPendingWrites();
-      if (request.kind !== "javascript" && isDependencyMutationCommand(request.source)) this.dependencySnapshotDirty = true;
-      await this.flushDependencySnapshot();
+      if (abortHandler) request.signal?.removeEventListener("abort", abortHandler);
+      if (scriptFsPath) await this.cleanupRuntimeScript(scriptFsPath);
+      await this.settleRuntimeWritesAfterCommand();
+      if (request.kind !== "javascript" && isDependencyMutationCommand(request.source)) this.dependencySnapshots.markDirty();
     }
-    runtimeLog.info("Runtime 命令结束", { kind: request.kind, command, exitCode, outputBytes: stdout.length });
-    return { exitCode, stdout, stderr: exitCode === 0 ? "" : stdout };
   }
 
   async startInteractive(onOutput: (data: string) => void, dimensions: TerminalDimensions): Promise<InteractiveRuntimeSession> {
     const container = this.requireContainer();
     this.shell?.kill();
     this.shellWriter?.releaseLock();
-    await this.flushDependencySnapshot();
     this.shell = await container.spawn("jsh", { cwd: ".", terminal: dimensions, env: runtimePackageEnvironment(container.workdir) });
-    runtimeLog.info("交互式 jsh 已启动", { cwd: "/workspace", columns: dimensions.cols, rows: dimensions.rows });
+    runtimeLog.info("交互式 jsh 已启动", { cwd: ".", columns: dimensions.cols, rows: dimensions.rows });
     const process = this.shell;
     this.shellWriter = process.input.getWriter();
     void process.output.pipeTo(new WritableStream({ write: onOutput })).catch((error) => {
@@ -229,7 +246,8 @@ export class WorkspaceMirror {
     });
     return {
       id: crypto.randomUUID(),
-      workingDirectory: "/workspace",
+      workingDirectory: ".",
+      runtimeCommandsUseRelativePaths: true,
       write: async (data) => { await this.shellWriter?.write(data); },
       resize: (next) => process.resize(next),
       kill: () => { runtimeLog.info("交互式 jsh 已终止"); process.kill(); }
@@ -241,13 +259,15 @@ export class WorkspaceMirror {
     this.shell = undefined;
     this.shellWriter?.releaseLock();
     this.shellWriter = undefined;
-    await this.flushDependencySnapshot();
+    this.dependencySnapshots.cancelPending();
+    await this.dependencySnapshots.waitForSaving();
     for (const timeout of this.pending.values()) clearTimeout(timeout);
     this.pending.clear();
     this.watcher?.close();
     this.watcher = undefined;
     this.container = undefined;
     this.fileService = undefined;
+    this.dependencySnapshots.reset();
     runtimeLog.debug("已断开项目 Runtime；共享 WebContainer 实例继续复用");
   }
 
@@ -266,41 +286,47 @@ export class WorkspaceMirror {
     }
   }
 
-  private scheduleDependencySnapshot(): void {
-    this.dependencySnapshotDirty = true;
-    if (this.dependencySnapshotTimer) clearTimeout(this.dependencySnapshotTimer);
-    this.dependencySnapshotTimer = setTimeout(() => { this.dependencySnapshotTimer = undefined; void this.flushDependencySnapshot(); }, 800);
-  }
-
-  private async flushDependencySnapshot(): Promise<void> {
-    if (this.dependencySnapshotTimer) { clearTimeout(this.dependencySnapshotTimer); this.dependencySnapshotTimer = undefined; }
-    if (this.dependencySnapshotPromise) await this.dependencySnapshotPromise;
-    if (!this.dependencySnapshotDirty || !this.fileService || !this.container) return;
-    this.dependencySnapshotDirty = false;
+  private async saveDependencySnapshot(): Promise<void> {
+    if (!this.fileService || !this.container) return;
     const fileService = this.fileService;
     const container = this.container;
-    this.dependencySnapshotPromise = (async () => {
-      try {
-        const snapshot = await encodeDependencySnapshot(await container.export("node_modules", { format: "json" }));
-        await fileService.write(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, snapshot, { source: "terminal" });
-        runtimeLog.info("已保存项目持久依赖快照", { projectId: fileService.projectId, bytes: snapshot.byteLength });
-      } catch (error) {
-        if (isMissing(error)) {
-          if (await fileService.exists(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT)) await fileService.delete(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, "terminal");
-          runtimeLog.info("Runtime 中已无 node_modules，已清理持久依赖快照", { projectId: fileService.projectId });
-        } else {
-          runtimeLog.error("保存项目持久依赖快照失败", { projectId: fileService.projectId }, error);
-          this.onEvent?.({ kind: "error", path: BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, message: `依赖快照保存失败：${errorMessage(error)}` });
-        }
-      }
-    })().finally(() => { this.dependencySnapshotPromise = undefined; });
-    await this.dependencySnapshotPromise;
-    if (this.dependencySnapshotDirty) await this.flushDependencySnapshot();
+    try {
+      const snapshot = await encodeDependencySnapshot(await container.export("node_modules", { format: "json" }));
+      await fileService.write(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, snapshot, { source: "terminal" });
+      runtimeLog.info("已保存项目持久依赖快照", { projectId: fileService.projectId, bytes: snapshot.byteLength });
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      if (await fileService.exists(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT)) await fileService.delete(BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT, "terminal");
+      runtimeLog.info("Runtime 中已无 node_modules，已清理持久依赖快照", { projectId: fileService.projectId });
+    }
+  }
+
+  private reportDependencySnapshotFailure(failure: DependencySnapshotFailure): void {
+    const serialized = serializeError(failure.error);
+    runtimeLog.warn("保存项目持久依赖快照失败；Runtime 命令结果不受影响", {
+      projectId: this.fileService?.projectId,
+      snapshotState: "failed_retryable",
+      retryAttempt: failure.retryAttempt,
+      retryDelayMs: failure.retryDelayMs,
+      error: serialized
+    });
+    try {
+      this.onEvent?.({
+        kind: "diagnostic",
+        severity: "warning",
+        code: "dependency_snapshot_save_failed",
+        path: BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT,
+        message: `依赖快照保存失败，将自动重试：${serialized.message}`,
+        error: serialized
+      });
+    } catch (eventError) {
+      runtimeLog.warn("Runtime 诊断事件消费者抛错", { error: serializeError(eventError) });
+    }
   }
 
   private async syncRuntimePath(sourcePath: string, storagePath = sourcePath): Promise<void> {
-    if (!this.fileService || !this.container || isRuntimeIgnoredPath(sourcePath)) return;
-    const source = runtimeFsPath(sourcePath);
+    if (!this.fileService || !this.container || isRuntimeMirrorIgnoredPath(sourcePath)) return;
+    const source = toContainerFsPath(sourcePath);
     try {
       const data = await this.container.fs.readFile(source);
       await this.fileService.write(storagePath, data, { source: "terminal" });
@@ -308,7 +334,11 @@ export class WorkspaceMirror {
       if (!isBrowserAgentPackagePath(storagePath)) this.onEvent?.({ kind: "sync", path: storagePath, message: `终端已写入真实项目：${storagePath}` });
       return;
     } catch (error) {
-      if (!isMissing(error) && !/EISDIR/i.test(errorMessage(error))) {
+      if (isMissing(error)) {
+        if (await this.fileService.exists(storagePath)) await this.fileService.delete(storagePath, "terminal");
+        return;
+      }
+      if (!isDirectorySignal(error)) {
         runtimeLog.error("读取 Runtime 文件失败", { projectId: this.fileService.projectId, sourcePath, storagePath }, error);
         this.onEvent?.({ kind: "error", path: storagePath, message: errorMessage(error) });
         return;
@@ -332,13 +362,77 @@ export class WorkspaceMirror {
   }
 
   private trackRuntimeSync(path: string): Promise<void> {
-    const operation = this.syncRuntimePath(path);
-    this.activeRuntimeSyncs.add(operation);
+    const existing = [...this.activeRuntimeSyncs].find(([activePath]) => isSameOrDescendantPath(path, activePath));
+    if (existing) return existing[1];
+    const descendants = [...this.activeRuntimeSyncs]
+      .filter(([activePath]) => isSameOrDescendantPath(activePath, path))
+      .map(([, operation]) => operation);
+    const operation = Promise.all(descendants).then(() => this.syncRuntimePath(path));
+    this.activeRuntimeSyncs.set(path, operation);
     void operation.then(
-      () => this.activeRuntimeSyncs.delete(operation),
-      () => this.activeRuntimeSyncs.delete(operation)
+      () => this.activeRuntimeSyncs.delete(path),
+      () => this.activeRuntimeSyncs.delete(path)
     );
     return operation;
+  }
+
+  private scheduleRuntimeSync(path: string): void {
+    const merged = coalesceRuntimeSyncPaths([...this.pending.keys(), path]);
+    for (const [pendingPath, timeout] of this.pending) {
+      if (!merged.includes(pendingPath)) {
+        clearTimeout(timeout);
+        this.pending.delete(pendingPath);
+      }
+    }
+    const target = merged.find((candidate) => isSameOrDescendantPath(path, candidate)) ?? path;
+    const previous = this.pending.get(target);
+    if (previous) clearTimeout(previous);
+    this.pending.set(target, setTimeout(() => {
+      this.pending.delete(target);
+      void this.trackRuntimeSync(target).catch((error) => {
+        runtimeLog.error("Runtime 文件事件写回失败", { path: target }, error);
+      });
+    }, 160));
+  }
+
+  private async cleanupRuntimeScript(path: string): Promise<void> {
+    try {
+      await this.container?.fs.rm(path, { force: true });
+    } catch (error) {
+      runtimeLog.warn("清理 Runtime 临时 JavaScript 失败", { path, error: serializeError(error) });
+      try {
+        this.onEvent?.({
+          kind: "diagnostic",
+          severity: "warning",
+          code: "runtime_temp_cleanup_failed",
+          path,
+          message: `Runtime 临时脚本清理失败：${errorMessage(error)}`,
+          error: serializeError(error)
+        });
+      } catch (eventError) {
+        runtimeLog.warn("Runtime 诊断事件消费者抛错", { error: serializeError(eventError) });
+      }
+    }
+  }
+
+  private async settleRuntimeWritesAfterCommand(): Promise<void> {
+    try {
+      await this.flushPendingWrites();
+    } catch (error) {
+      const serialized = serializeError(error);
+      runtimeLog.warn("Runtime 命令后的项目写回未完全落盘；命令结果保持不变", { error: serialized });
+      try {
+        this.onEvent?.({
+          kind: "diagnostic",
+          severity: "warning",
+          code: "runtime_write_flush_failed",
+          message: `Runtime 项目写回失败：${serialized.message}`,
+          error: serialized
+        });
+      } catch (eventError) {
+        runtimeLog.warn("Runtime 诊断事件消费者抛错", { error: serializeError(eventError) });
+      }
+    }
   }
 
   private requireContainer(): WebContainer {
@@ -360,15 +454,15 @@ export class WebContainerRuntimeProvider implements ScriptRuntimeProvider {
   available(): Promise<boolean> { return this.mirror.available(); }
   async start(): Promise<RuntimeSession> {
     if (!this.mirror.ready) throw new Error("请先连接项目目录。 ");
-    return { id: crypto.randomUUID(), workingDirectory: "/workspace" };
+    return { id: crypto.randomUUID(), workingDirectory: ".", runtimeCommandsUseRelativePaths: true };
   }
-  execute(_session: RuntimeSession, request: ScriptExecutionRequest): Promise<ScriptExecutionResult> { return this.mirror.execute(request); }
+  execute(session: RuntimeSession, request: ScriptExecutionRequest): Promise<ScriptExecutionResult> { return this.mirror.execute(request, session.id); }
   startInteractive(onOutput: (data: string) => void, dimensions: TerminalDimensions): Promise<InteractiveRuntimeSession> { return this.mirror.startInteractive(onOutput, dimensions); }
   async terminate(_session?: RuntimeSession): Promise<void> { await this.mirror.disconnect(); }
   limitations(): string[] {
     return [
       "这是特殊 WebContainer jsh，不是 Windows PowerShell、CMD、宿主 Linux Bash 或完整操作系统",
-      "逻辑项目根目录是 /workspace；不存在可供 Agent 使用的宿主绝对路径",
+      "所有 Runtime 命令从项目根目录启动；请使用 . 和相对路径，不要依赖内部绝对路径",
       "只保证 Node.js、npm 和纯 JavaScript",
       `npm/pnpm/yarn 下载缓存持久化到 ${BROWSER_AGENT_PACKAGE_DIRECTORY}`,
       `已安装的纯 JavaScript 依赖持久化到 ${BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY}，新终端和重新挂载后可直接使用`,
@@ -378,7 +472,52 @@ export class WebContainerRuntimeProvider implements ScriptRuntimeProvider {
   }
 }
 
-export function shouldMirrorPath(path: string): boolean { return path !== BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT && !isRuntimeIgnoredPath(path); }
+export function shouldMirrorPath(path: string): boolean { return path !== BROWSER_AGENT_INSTALLED_PACKAGE_SNAPSHOT && !isRuntimeMirrorIgnoredPath(path); }
+
+export function runtimeScriptPaths(runId: string, executionId: string): { fsDirectory: string; fsPath: string; processPath: string } {
+  const safeRunId = safeRuntimePathSegment(runId);
+  const safeExecutionId = safeRuntimePathSegment(executionId);
+  const fsDirectory = `${RUNTIME_TEMP_DIRECTORY}/${safeRunId}`;
+  const fsPath = `${fsDirectory}/${safeExecutionId}.mjs`;
+  return { fsDirectory, fsPath, processPath: toProcessRelativePath(fsPath) };
+}
+
+export function isRuntimeTemporaryPath(path: string): boolean {
+  const normalized = `/${path.replace(/\\/g, "/").replace(/^\/+/, "")}`.replace(/\/+/g, "/");
+  return normalized === RUNTIME_TEMP_DIRECTORY || normalized.startsWith(`${RUNTIME_TEMP_DIRECTORY}/`);
+}
+
+export function isDirectorySignal(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Record<string, unknown>;
+  return value.name === "TypeMismatchError" || value.code === "EISDIR" || /\bEISDIR\b/i.test(typeof value.message === "string" ? value.message : "");
+}
+
+export function coalesceRuntimeSyncPaths(paths: readonly string[]): string[] {
+  const normalized = [...new Set(paths.map(normalizeRuntimePath).filter((path) => !isRuntimeMirrorIgnoredPath(path)))];
+  return normalized
+    .sort((left, right) => left.length - right.length || left.localeCompare(right))
+    .filter((path, index, values) => !values.slice(0, index).some((parent) => isSameOrDescendantPath(path, parent)));
+}
+
+function isRuntimeMirrorIgnoredPath(path: string): boolean {
+  return isRuntimeTemporaryPath(path) || isRuntimeIgnoredPath(path);
+}
+
+function normalizeRuntimePath(path: string): string {
+  return `/${path.replace(/\\/g, "/").replace(/^\/+/, "")}`.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+function isSameOrDescendantPath(path: string, parent: string): boolean {
+  const normalizedPath = normalizeRuntimePath(path);
+  const normalizedParent = normalizeRuntimePath(parent);
+  return normalizedPath === normalizedParent || normalizedPath.startsWith(`${normalizedParent}/`);
+}
+
+function safeRuntimePathSegment(value: string): string {
+  const safe = value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  return safe.slice(0, 96) || "run";
+}
 
 async function sharedWebContainer(): Promise<WebContainer> {
   const runtimeGlobal = globalThis as RuntimeGlobal;
@@ -473,5 +612,8 @@ async function restorePackageBinPermissions(container: WebContainer): Promise<vo
   const [exitCode] = await Promise.all([process.exit, output]);
   if (exitCode !== 0) runtimeLog.warn("恢复依赖命令执行权限失败", { exitCode });
 }
-function isMissing(error: unknown): boolean { return /ENOENT|not.?found|不存在/i.test(errorMessage(error)); }
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function isMissing(error: unknown): boolean {
+  const serialized = serializeError(error);
+  return serialized.code === "ENOENT" || /ENOENT|not.?found|不存在/i.test(serialized.message);
+}
+function errorMessage(error: unknown): string { return serializeError(error).message; }

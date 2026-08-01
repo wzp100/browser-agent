@@ -1,4 +1,10 @@
-export interface RuntimeSession { id: string; workingDirectory: string; }
+export interface RuntimeSession {
+  id: string;
+  /** 面向调用方的项目根工作目录，不暴露 WebContainer 的内部绝对路径。 */
+  workingDirectory: ".";
+  /** Runtime 命令必须使用项目根相对路径。 */
+  runtimeCommandsUseRelativePaths: true;
+}
 export interface ScriptExecutionRequest { source: string; workingDirectory: string; kind?: "shell" | "javascript"; timeoutMs?: number; signal?: AbortSignal; scratchDirectory?: string; }
 export interface ScriptExecutionResult { exitCode: number; stdout: string; stderr: string; }
 export interface TerminalDimensions { cols: number; rows: number; }

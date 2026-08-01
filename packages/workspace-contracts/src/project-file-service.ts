@@ -45,7 +45,7 @@ export interface ProjectFileBackup {
 
 export interface RecoveryBackupPayload { record: ProjectFileBackup; data: Uint8Array; }
 
-export type ChangeSetStatus = "active" | "completed" | "failed" | "cancelled" | "interrupted" | "restored";
+export type ChangeSetStatus = "active" | "paused" | "completed" | "failed" | "cancelled" | "interrupted" | "restored";
 
 export interface ChangeSetChange {
   id: string;
@@ -97,6 +97,7 @@ export class WorkspaceConflictError extends Error {
 export interface ChangeJournal {
   backup(projectId: string, path: string, operation: ProjectFileChange["type"], data?: Uint8Array): Promise<ProjectFileBackup>;
   beginRun?(projectId: string, runId: string): Promise<ChangeSet>;
+  reopenRun?(projectId: string, runId: string): Promise<ChangeSet>;
   appendChange?(projectId: string, runId: string, change: ChangeSetChange): Promise<void>;
   endRun?(projectId: string, runId: string, status: Exclude<ChangeSetStatus, "active">): Promise<ChangeSet>;
   list?(projectId: string): Promise<ChangeSet[]>;
@@ -137,6 +138,18 @@ export class OpfsChangeJournal implements ChangeJournal {
     const changeSet: ChangeSet = { id: crypto.randomUUID(), projectId, runId: normalizedRunId, status: "active", changes: [], createdAt: now, updatedAt: now };
     await this.writeChangeSet(changeSet);
     return changeSet;
+  }
+
+  async reopenRun(projectId: string, runId: string): Promise<ChangeSet> {
+    return this.enqueueChangeSet(projectId, runId, async () => {
+      const changeSet = await this.read(projectId, runId);
+      if (!changeSet) throw new Error(`找不到运行“${normalizeRunId(runId)}”的 ChangeSet。`);
+      if (changeSet.status === "restored") throw new Error("已恢复的 ChangeSet 不能重新打开。 ");
+      if (changeSet.status === "completed" || changeSet.status === "cancelled") throw new Error(`状态为 ${changeSet.status} 的 ChangeSet 不能重新打开。`);
+      const reopened = { ...changeSet, status: "active" as const, updatedAt: new Date().toISOString() };
+      await this.writeChangeSet(reopened);
+      return reopened;
+    });
   }
 
   appendChange(projectId: string, runId: string, change: ChangeSetChange): Promise<void> {
@@ -286,6 +299,14 @@ export class ProjectFileService {
     const normalizedRunId = normalizeRunId(runId);
     if (!this.journal.beginRun) throw new Error("当前恢复日志不支持运行级 ChangeSet。 ");
     const changeSet = await this.journal.beginRun(this.projectId, normalizedRunId);
+    this.activeRunId = normalizedRunId;
+    return changeSet;
+  }
+
+  async reopenRun(runId: string): Promise<ChangeSet> {
+    const normalizedRunId = normalizeRunId(runId);
+    if (!this.journal.reopenRun) throw new Error("当前恢复日志不支持重新打开 ChangeSet。 ");
+    const changeSet = await this.journal.reopenRun(this.projectId, normalizedRunId);
     this.activeRunId = normalizedRunId;
     return changeSet;
   }

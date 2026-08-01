@@ -1,6 +1,6 @@
 import type { AppLogRecord, AppLogSink } from "../../logging/src/index";
 import { BrowserDatabase } from "./database";
-import type { AttachmentRecord, LoggingSettingsRecord, MessageKind, MessageRecord, ModelSettingsRecord, ModelsDevCacheRecord, PersistedDirectoryHandle, ProjectRecord, ProviderProfile, RunRecord, ThreadModelSelection, ThreadRecord } from "./types";
+import type { AttachmentRecord, LoggingSettingsRecord, McpServerRecord, McpSettingsRecord, MessageKind, MessageRecord, ModelProbeRecord, ModelSettingsRecord, ModelsDevCacheRecord, PersistedDirectoryHandle, ProjectRecord, ProviderProfile, QueuedMessageKind, QueuedMessageMetadata, QueuedMessageStatus, RunRecord, ThreadModelSelection, ThreadRecord } from "./types";
 
 export class ProjectRepository {
   constructor(private readonly database: BrowserDatabase) {}
@@ -44,6 +44,8 @@ export class ConversationRepository {
     if (thread) await this.putThread({ ...thread, updatedAt: record.createdAt });
     return record;
   }
+  putMessage(message: MessageRecord): Promise<void> { return this.database.put("messages", message); }
+  deleteMessage(id: string): Promise<void> { return this.database.delete("messages", id); }
   async deleteThread(id: string): Promise<void> {
     await this.database.deleteByIndex("messages", "threadId", id);
     await this.database.deleteByIndex("runs", "threadId", id);
@@ -54,10 +56,61 @@ export class ConversationRepository {
   async deleteProjectThreads(projectId: string): Promise<void> { for (const thread of await this.listThreads(projectId)) await this.deleteThread(thread.id); }
   putRun(run: RunRecord): Promise<void> { return this.database.put("runs", run); }
   runs(threadId: string): Promise<RunRecord[]> { return this.database.getAllFromIndex<RunRecord>("runs", "threadId", threadId); }
+  async getRun(threadId: string, runId: string): Promise<RunRecord | undefined> { return (await this.runs(threadId)).find((run) => run.id === runId); }
+  async queuedMessages(threadId: string, kind?: QueuedMessageKind): Promise<MessageRecord[]> {
+    return (await this.messages(threadId)).filter((message) => {
+      const metadata = queuedMessageMetadata(message);
+      return metadata?.queueStatus === "pending" && (!kind || metadata.queueKind === kind);
+    });
+  }
+  async transitionQueuedMessage(messageId: string, status: QueuedMessageStatus, runId?: string): Promise<MessageRecord> {
+    const messages = await this.database.getAll<MessageRecord>("messages");
+    const message = messages.find((candidate) => candidate.id === messageId);
+    if (!message) throw new Error(`找不到排队消息：${messageId}`);
+    const current = queuedMessageMetadata(message);
+    if (!current) throw new Error(`消息“${messageId}”不是排队消息。`);
+    const allowed: Record<QueuedMessageStatus, QueuedMessageStatus[]> = {
+      pending: ["delivered", "withdrawn"],
+      delivered: ["consumed"],
+      consumed: [],
+      withdrawn: []
+    };
+    if (!allowed[current.queueStatus].includes(status)) throw new Error(`排队消息不能从 ${current.queueStatus} 变为 ${status}。`);
+    const now = new Date().toISOString();
+    const metadata: QueuedMessageMetadata = {
+      ...current,
+      queueStatus: status,
+      ...(runId ? { runId } : {}),
+      ...(status === "delivered" ? { deliveredAt: now } : {}),
+      ...(status === "consumed" ? { consumedAt: now } : {}),
+      ...(status === "withdrawn" ? { withdrawnAt: now } : {})
+    };
+    const updated = { ...message, metadata };
+    await this.putMessage(updated);
+    return updated;
+  }
   async setModelSelection(threadId: string, selection: ThreadModelSelection): Promise<void> {
     const thread = await this.getThread(threadId);
     if (!thread) throw new Error(`找不到对话：${threadId}`);
     await this.putThread({ ...thread, modelSelection: selection, modelConfigId: selection.providerProfileId, updatedAt: new Date().toISOString() });
+  }
+}
+
+export function queuedMessageMetadata(message: MessageRecord): QueuedMessageMetadata | undefined {
+  const value = message.metadata;
+  if (!value || typeof value.queueStatus !== "string") return undefined;
+  const legacyStatus = value.queueStatus === "running" ? "delivered" : value.queueStatus;
+  if (!["pending", "delivered", "consumed", "withdrawn"].includes(legacyStatus)) return undefined;
+  const queueKind = value.queueKind === "steering" || value.queueKind === "follow-up" ? value.queueKind : "follow-up";
+  return { ...value, queueKind, queueStatus: legacyStatus, queuedAt: typeof value.queuedAt === "string" ? value.queuedAt : message.createdAt } as QueuedMessageMetadata;
+}
+
+export class ModelProbeRepository {
+  constructor(private readonly database: BrowserDatabase) {}
+  put(record: ModelProbeRecord): Promise<void> { return this.database.put("modelProbes", record); }
+  async latest(providerProfileId: string, modelId: string): Promise<ModelProbeRecord | undefined> {
+    const records = await this.database.getAllFromIndex<ModelProbeRecord>("modelProbes", "providerModel", [providerProfileId, modelId]);
+    return records.sort((left, right) => right.testedAt.localeCompare(left.testedAt))[0];
   }
 }
 
@@ -115,6 +168,8 @@ export class SettingsRepository {
   putLogging(settings: LoggingSettingsRecord): Promise<void> { return this.database.put("settings", settings); }
   getModelsDevCache(): Promise<ModelsDevCacheRecord | undefined> { return this.database.get<ModelsDevCacheRecord>("settings", "models-dev-cache"); }
   putModelsDevCache(cache: ModelsDevCacheRecord): Promise<void> { return this.database.put("settings", cache); }
+  async getMcpServers(): Promise<McpServerRecord[]> { return (await this.database.get<McpSettingsRecord>("settings", "mcp-servers"))?.servers ?? []; }
+  putMcpServers(servers: McpServerRecord[]): Promise<void> { return this.database.put("settings", { key: "mcp-servers", servers } satisfies McpSettingsRecord); }
   async listProviderProfiles(): Promise<ProviderProfile[]> { return new ProviderProfileRepository(this.database).list(); }
   getProviderProfile(id: string): Promise<ProviderProfile | undefined> { return new ProviderProfileRepository(this.database).get(id); }
   putProviderProfile(profile: ProviderProfile): Promise<void> { return new ProviderProfileRepository(this.database).put(profile); }

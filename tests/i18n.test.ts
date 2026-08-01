@@ -33,9 +33,12 @@ test("手动语言设置覆盖浏览器语言并可持久保存", () => {
 });
 
 test("英文界面翻译静态、动态和对话框文本", () => {
-  assert.equal(translateText("新建任务", "en"), "New task");
+  assert.equal(translateText("新建项目", "en"), "New project");
   assert.equal(translateText("已连接 · 12 个文件", "en"), "Connected · 12 files");
   assert.equal(translateText("上下文 8k / 32k · 25% · 已压缩 9 条", "en"), "Context 8k / 32k · 25% · 9 compressed");
+  assert.equal(translateText("Agent 正在执行第 2 轮…", "en"), "Agent is running turn 2…");
+  assert.equal(translateText("Agent 正在执行第 3 个模型回合。", "en"), "Agent is running model turn 3.");
+  assert.equal(translateText("文本 通过 · 流式 通过 · 工具 通过 · 图片 不支持", "en"), "Text passed · Streaming passed · Tools passed · Images not supported");
   assert.equal(translateText("Agent 请求执行需要授权的工具：workspace.write\n\n仅允许此次调用？", "en"), "The Agent is requesting permission to run this tool:workspace.write\n\nAllow this call once?");
 });
 
@@ -72,6 +75,6 @@ test("英文界面翻译带变量的常见运行消息并保留用户值", () =>
 });
 
 test("中文界面和未知内容保持原样", () => {
-  assert.equal(translateText("新建任务", "zh-CN"), "新建任务");
+  assert.equal(translateText("新建项目", "zh-CN"), "新建项目");
   assert.equal(translateText("用户自己的项目名称", "en"), "用户自己的项目名称");
 });

@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BrowserDatabase, BrowserLogStore, ConversationRepository, migrateLegacyConversations, ProjectRepository } from "../packages/persistence/src/index";
+import { BrowserDatabase, BrowserLogStore, ConversationRepository, migrateLegacyConversations, ModelProbeRepository, ProjectRepository, SettingsRepository } from "../packages/persistence/src/index";
 
 test("IndexedDB 按 projectId 持久化项目、对话和有序消息", async () => {
   const database = new BrowserDatabase();
@@ -77,4 +77,48 @@ test("诊断日志写入 IndexedDB 后可读取和清空", async () => {
   assert.equal((await store.list())[0]?.scope, "runtime.webcontainer");
   await store.clear();
   assert.equal((await store.list()).length, 0);
+});
+
+test("排队消息可原位更新并撤回", async () => {
+  const conversations = new ConversationRepository(new BrowserDatabase());
+  const now = new Date().toISOString();
+  await conversations.putThread({ id: "thread-queue", projectId: "project-1", title: "队列", createdAt: now, updatedAt: now });
+  const queued = await conversations.appendMessage({ threadId: "thread-queue", role: "user", kind: "user", content: "继续检查", metadata: { queueStatus: "pending" } });
+  await conversations.putMessage({ ...queued, metadata: { queueStatus: "running" } });
+  assert.equal((await conversations.messages("thread-queue"))[0]?.metadata?.queueStatus, "running");
+  await conversations.deleteMessage(queued.id);
+  assert.equal((await conversations.messages("thread-queue")).length, 0);
+});
+
+test("Steering 与 Follow-up 使用显式可恢复状态机", async () => {
+  const conversations = new ConversationRepository(new BrowserDatabase());
+  const now = new Date().toISOString();
+  await conversations.putThread({ id: "thread-queue-state", projectId: "project-1", title: "队列状态", createdAt: now, updatedAt: now });
+  const steering = await conversations.appendMessage({ threadId: "thread-queue-state", role: "user", kind: "user", content: "改用中文", metadata: { queueKind: "steering", queueStatus: "pending", queuedAt: now, runId: "run-1" } });
+  const followUp = await conversations.appendMessage({ threadId: "thread-queue-state", role: "user", kind: "user", content: "完成后总结", metadata: { queueKind: "follow-up", queueStatus: "pending", queuedAt: now } });
+  assert.deepEqual((await conversations.queuedMessages("thread-queue-state", "steering")).map((item) => item.id), [steering.id]);
+  const delivered = await conversations.transitionQueuedMessage(steering.id, "delivered", "run-1");
+  assert.equal(delivered.metadata?.queueStatus, "delivered");
+  const consumed = await conversations.transitionQueuedMessage(steering.id, "consumed", "run-1");
+  assert.equal(consumed.metadata?.queueStatus, "consumed");
+  const withdrawn = await conversations.transitionQueuedMessage(followUp.id, "withdrawn");
+  assert.equal(withdrawn.metadata?.queueStatus, "withdrawn");
+  await assert.rejects(() => conversations.transitionQueuedMessage(followUp.id, "delivered"), /不能从 withdrawn/);
+});
+
+test("模型 Quick Test 结果按供应商和模型读取最新记录", async () => {
+  const probes = new ModelProbeRepository(new BrowserDatabase());
+  await probes.put({ id: "probe-old", providerProfileId: "provider", modelId: "model", endpointOrigin: "https://example.com", text: true, toolCalling: false, imageInput: false, streaming: true, testedAt: "2026-07-25T00:00:00.000Z" });
+  await probes.put({ id: "probe-new", providerProfileId: "provider", modelId: "model", endpointOrigin: "https://example.com", text: true, toolCalling: true, imageInput: true, streaming: true, testedAt: "2026-07-26T00:00:00.000Z" });
+  assert.equal((await probes.latest("provider", "model"))?.id, "probe-new");
+});
+
+test("MCP Server 配置持久保存且不包含鉴权密钥字段", async () => {
+  const settings = new SettingsRepository(new BrowserDatabase());
+  const now = new Date().toISOString();
+  await settings.putMcpServers([{ id: "mcp-1", name: "知识库", url: "https://example.com/mcp", enabled: true, createdAt: now, updatedAt: now }]);
+  const [server] = await settings.getMcpServers();
+  assert.equal(server?.name, "知识库");
+  assert.equal(JSON.stringify(server).includes("token"), false);
+  assert.equal(JSON.stringify(server).includes("authorization"), false);
 });

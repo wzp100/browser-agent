@@ -33,7 +33,7 @@ Browser Agent 是一个在 Chrome 或 Edge 中运行的本地优先 AI 项目工
 | 🧠 | **工具型智能体** | LangGraph 负责编排模型、类型化工具、错误恢复和完成证据。 |
 | ⚡ | **浏览器 Runtime** | WebContainer 提供 `jsh`、Node.js、npm、pnpm 及兼容的纯 JavaScript 包。 |
 | 📄 | **Office 生成** | 在浏览器中创建和检查表格、文档、演示文稿及 PDF。 |
-| 🧰 | **Skills** | 内置或用户安装的 Skill 提供可复用工作流，并与 Agent 核心解耦。 |
+| 🧰 | **插件** | 在主界面统一管理系统、用户、项目 Skills，以及经网络授权的 HTTP MCP Server。 |
 | 💾 | **持久恢复** | 项目、对话、权限、运行记录和依赖快照保存在本地并可恢复。 |
 | 🌐 | **多模型供应商** | 支持 OpenAI Responses、DeepSeek、本地 Gateway 和自定义 OpenAI-compatible Endpoint。 |
 | 🛡️ | **可审查修改** | 支持写入授权、文件指纹、写前恢复、Diff、日志和运行记录。 |
@@ -72,7 +72,7 @@ apps/web
 
 ### <https://browser-agent-wzp100-app.pages.dev/>
 
-1. 点击“新建任务”，选择项目文件夹并授权。
+1. 点击“新建项目”，选择项目文件夹并授权。
 2. 打开“设置”，选择供应商和模型，填写 API Key。
 3. 输入任务，并审查智能体请求的写入或执行操作。
 4. 需要 Node.js、npm 或 Shell 工具时启动 Runtime。

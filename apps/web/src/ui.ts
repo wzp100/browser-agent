@@ -1,8 +1,10 @@
 import type { App as VueApp } from "vue";
 import type { AppLogRecord } from "../../../packages/logging/src/index";
-import type { MessageRecord, ModelDescriptor, ProjectRecord, ProviderProfile, ThreadRecord } from "../../../packages/persistence/src/index";
+import type { McpServerRecord, MessageRecord, ModelDescriptor, ProjectRecord, ProviderProfile, ThreadRecord } from "../../../packages/persistence/src/index";
 import type { SkillSummary } from "../../../packages/skill-core/src/index";
 import { workspacePathFromHref } from "../../../packages/workspace-contracts/src/index";
+import { APP_VERSION } from "../../../packages/version";
+import { t } from "./i18n";
 
 export interface SidebarActions {
   openThread(threadId: string): void;
@@ -19,7 +21,7 @@ interface MarkdownMessageMount {
 }
 
 type ToolStepStatus = "running" | "completed" | "failed";
-export type ToolRunStatus = "running" | "completed" | "failed";
+export type ToolRunStatus = "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
 
 interface ToolStepMount {
   details: HTMLDetailsElement;
@@ -80,7 +82,7 @@ export interface FileTreeActions {
 
 export interface RunCenterItem {
   id: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  status: "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
   model?: string;
   durationMs?: number;
   toolCount: number;
@@ -88,25 +90,33 @@ export interface RunCenterItem {
   changedFiles: string[];
   createdAt: string;
   error?: string;
+  canResume?: boolean;
 }
 
 export interface RunCenterActions {
   viewDiff?(runId: string): void | Promise<void>;
   restore?(runId: string): void | Promise<void>;
   retry?(runId: string, mode: "current" | "rollback"): void | Promise<void>;
+  resume?(runId: string): void | Promise<void>;
 }
 
 export interface ChangeSetListItem {
   runId: string;
-  status: "active" | "completed" | "failed" | "cancelled" | "interrupted" | "restored";
+  status: "active" | "paused" | "completed" | "failed" | "cancelled" | "interrupted" | "restored";
   changeCount: number;
   updatedAt: string;
 }
 
 export interface SkillActions {
-  inspect?(skillId: string): void | Promise<void>;
-  setEnabled?(skillId: string, enabled: boolean): void | Promise<void>;
-  uninstall?(skillId: string): void | Promise<void>;
+  inspect?(skillReference: string): void | Promise<void>;
+  setEnabled?(skillReference: string, enabled: boolean): void | Promise<void>;
+  uninstall?(skillReference: string): void | Promise<void>;
+}
+
+export interface McpServerActions {
+  test?(serverId: string): void | Promise<void>;
+  setEnabled?(serverId: string, enabled: boolean): void | Promise<void>;
+  remove?(serverId: string): void | Promise<void>;
 }
 
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -128,7 +138,7 @@ export function selectSupportedImages(files: Iterable<File>, availableBytes = MA
 }
 
 export function toolRunShouldBeOpen(status: ToolRunStatus, userExpanded?: boolean): boolean {
-  if (status === "running" || status === "failed") return true;
+  if (status === "running" || status === "paused" || status === "failed") return true;
   return userExpanded === true;
 }
 
@@ -142,6 +152,7 @@ export function visibleFileTreeItems(entries: FileTreeItem[], query = ""): FileT
 
 export class AppUi {
   readonly newProject = required<HTMLButtonElement>("#new-project");
+  readonly pluginsTrigger = required<HTMLButtonElement>("#plugins-trigger");
   readonly projectList = required<HTMLElement>("#project-list");
   readonly threadTitle = required<HTMLElement>("#thread-title");
   readonly projectLabel = required<HTMLElement>("#project-label");
@@ -154,6 +165,7 @@ export class AppUi {
   readonly intent = required<HTMLTextAreaElement>("#intent");
   readonly send = required<HTMLButtonElement>("#send");
   readonly stopRun = required<HTMLButtonElement>("#stop-run");
+  readonly composerSendMode = required<HTMLSelectElement>("#composer-send-mode");
   readonly composerStatus = required<HTMLElement>("#composer-status");
   readonly composerProvider = required<HTMLSelectElement>("#composer-provider");
   readonly composerModel = required<HTMLSelectElement>("#composer-model");
@@ -182,7 +194,9 @@ export class AppUi {
   readonly terminalClear = required<HTMLButtonElement>("#terminal-clear");
   readonly runtimeStatus = required<HTMLElement>("#runtime-status");
   readonly settingsTrigger = required<HTMLButtonElement>("#settings-trigger");
+  readonly appVersion = required<HTMLElement>("#app-version");
   readonly settingsDialog = required<HTMLDialogElement>("#settings-dialog");
+  readonly pluginsDialog = required<HTMLDialogElement>("#plugins-dialog");
   readonly appLanguage = required<HTMLSelectElement>("#app-language");
   readonly providerMode = required<HTMLSelectElement>("#provider-mode");
   readonly providerUrl = required<HTMLInputElement>("#provider-url");
@@ -190,9 +204,19 @@ export class AppUi {
   readonly apiKey = required<HTMLInputElement>("#api-key");
   readonly modelHelp = required<HTMLElement>("#model-help");
   readonly saveModel = required<HTMLButtonElement>("#save-model");
+  readonly quickTestModel = required<HTMLButtonElement>("#quick-test-model");
+  readonly modelProbeStatus = required<HTMLElement>("#model-probe-status");
   readonly addProvider = required<HTMLButtonElement>("#add-provider");
   readonly installSkill = required<HTMLButtonElement>("#install-skill");
-  readonly skillList = required<HTMLElement>("#skill-list");
+  readonly refreshProjectSkills = required<HTMLButtonElement>("#refresh-project-skills");
+  readonly systemSkillList = required<HTMLElement>("#system-skill-list");
+  readonly userSkillList = required<HTMLElement>("#user-skill-list");
+  readonly projectSkillList = required<HTMLElement>("#project-skill-list");
+  readonly projectSkillHelp = required<HTMLElement>("#project-skill-help");
+  readonly mcpName = required<HTMLInputElement>("#mcp-name");
+  readonly mcpUrl = required<HTMLInputElement>("#mcp-url");
+  readonly addMcpServer = required<HTMLButtonElement>("#add-mcp-server");
+  readonly mcpServerList = required<HTMLElement>("#mcp-server-list");
   readonly logLevel = required<HTMLSelectElement>("#log-level");
   readonly loggingEnabled = required<HTMLInputElement>("#logging-enabled");
   readonly projectLoggingEnabled = required<HTMLInputElement>("#project-logging-enabled");
@@ -212,7 +236,10 @@ export class AppUi {
   private readonly markdownApps = new Map<HTMLElement, VueApp>();
   private readonly toolRuns = new Map<string, ToolRunMount>();
   private streamingAssistant: MarkdownMessageMount | undefined;
+  private pendingAssistantDelta = "";
+  private assistantDeltaFrame: number | undefined;
   private workspaceFileOpener?: (path: string) => void | Promise<void>;
+  private queuedMessageHandler?: (messageId: string) => void | Promise<void>;
   private attachmentHandler: ((files: File[]) => void | Promise<void>) | undefined;
   private attachmentRemoveHandler: ((id: string) => void | Promise<void>) | undefined;
   private composerModels: ModelDescriptor[] = [];
@@ -222,6 +249,7 @@ export class AppUi {
   private fileTreeActions: FileTreeActions = {};
 
   constructor() {
+    this.appVersion.textContent = `v${APP_VERSION}`;
     this.intent.addEventListener("input", () => this.resizeComposer());
     this.filePanelTrigger.addEventListener("click", () => this.toggleWorkspacePanel(this.fileTreePanel, this.filePanelTrigger));
     this.runPanelTrigger.addEventListener("click", () => this.toggleWorkspacePanel(this.runCenterPanel, this.runPanelTrigger));
@@ -259,6 +287,11 @@ export class AppUi {
     });
     this.messageFeed.addEventListener("click", (event) => {
       const target = event.target;
+      const withdraw = target instanceof Element ? target.closest<HTMLButtonElement>("[data-withdraw-queued]") : null;
+      if (withdraw?.dataset.withdrawQueued) {
+        void Promise.resolve(this.queuedMessageHandler?.(withdraw.dataset.withdrawQueued)).catch((error) => this.toast(error instanceof Error ? error.message : String(error)));
+        return;
+      }
       const anchor = target instanceof Element ? target.closest<HTMLAnchorElement>("a") : null;
       const path = anchor ? workspacePathFromHref(anchor.href, location.href) : undefined;
       if (!path) return;
@@ -269,6 +302,7 @@ export class AppUi {
   }
 
   setWorkspaceFileOpener(opener: (path: string) => void | Promise<void>): void { this.workspaceFileOpener = opener; }
+  setQueuedMessageHandler(handler: (messageId: string) => void | Promise<void>): void { this.queuedMessageHandler = handler; }
 
   setPermissionMode(mode: ProjectPermissionMode): void { this.permissionMode.value = mode; }
 
@@ -311,6 +345,7 @@ export class AppUi {
       const buttons = element("div", "item-actions");
       appendActionButton(buttons, "查看 Diff", Boolean(actions.viewDiff), () => this.runUiAction(() => actions.viewDiff?.(run.id)));
       appendActionButton(buttons, "恢复", Boolean(actions.restore), () => this.runUiAction(() => actions.restore?.(run.id)));
+      if (run.canResume) appendActionButton(buttons, "从检查点继续", Boolean(actions.resume), () => this.runUiAction(() => actions.resume?.(run.id)));
       appendActionButton(buttons, "基于当前状态重试", Boolean(actions.retry), () => this.runUiAction(() => actions.retry?.(run.id, "current")));
       appendActionButton(buttons, "回滚后重试", Boolean(actions.retry), () => this.runUiAction(() => actions.retry?.(run.id, "rollback")));
       item.append(buttons);
@@ -416,7 +451,7 @@ export class AppUi {
   setStopAvailable(available: boolean): void {
     this.stopRun.hidden = !available;
     this.stopRun.disabled = !available;
-    this.send.hidden = available;
+    this.send.hidden = false;
   }
 
   renderSidebar(projects: ProjectRecord[], threads: ThreadRecord[], activeThreadId: string | undefined, actions: SidebarActions): void {
@@ -449,6 +484,9 @@ export class AppUi {
   }
 
   renderMessages(messages: MessageRecord[]): void {
+    if (this.assistantDeltaFrame !== undefined) cancelAnimationFrame(this.assistantDeltaFrame);
+    this.assistantDeltaFrame = undefined;
+    this.pendingAssistantDelta = "";
     this.streamingAssistant = undefined;
     for (const app of this.markdownApps.values()) app.unmount();
     this.markdownApps.clear();
@@ -472,7 +510,24 @@ export class AppUi {
       article = this.createAssistantMessage(message.content, true).article;
     } else {
       article = element("article", `message ${message.kind}`);
-      if (message.kind === "user") article.append(element("div", "message-bubble", message.content));
+      if (message.kind === "user") {
+        article.append(element("div", "message-bubble", message.content));
+        if (typeof message.metadata?.queueStatus === "string") {
+          const rawStatus = message.metadata.queueStatus === "running" ? "delivered" : message.metadata.queueStatus;
+          const queueKind = message.metadata.queueKind === "steering" ? "steering" : "follow-up";
+          article.classList.add("queued", `queue-${rawStatus}`);
+          const queueBar = element("div", "queued-message-bar");
+          const statusLabel = t(rawStatus === "pending" ? queueKind === "steering" ? "等待引导当前任务" : "等待当前任务完成" : rawStatus === "delivered" ? "已投递到当前任务" : rawStatus === "withdrawn" ? "已撤回" : "已消费");
+          queueBar.append(element("span", "queued-message-label", statusLabel));
+          if (rawStatus === "pending") {
+            const withdraw = element("button", "queued-message-withdraw", t("撤回")) as HTMLButtonElement;
+            withdraw.type = "button";
+            withdraw.dataset.withdrawQueued = message.id;
+            queueBar.append(withdraw);
+          }
+          article.append(queueBar);
+        }
+      }
       else {
         const card = element("div", "event-card");
         const header = element("header");
@@ -513,12 +568,18 @@ export class AppUi {
     run.status = status;
     run.article.dataset.status = status;
     run.indicator.className = `tool-run-indicator ${status}`;
-    run.title.textContent = status === "completed" ? "运行完成" : "运行失败";
+    run.title.textContent = t({
+      paused: "运行已暂停",
+      completed: "运行完成",
+      failed: "运行失败",
+      cancelled: "运行已取消",
+      interrupted: "运行已中断"
+    }[status]);
     run.details.open = toolRunShouldBeOpen(status, run.userExpanded);
     for (const step of run.steps.values()) {
       if (step.status !== "running") continue;
       this.setToolStepStatus(step, "failed");
-      step.resultOutput.textContent = "工具未返回输出，运行已结束。";
+      step.resultOutput.textContent = t("工具未返回输出，运行已结束。");
     }
   }
 
@@ -536,19 +597,19 @@ export class AppUi {
     if (!step) {
       step = this.createToolStep(run, callId, toolName);
       run.steps.set(callId, step);
-      run.count.textContent = `${run.steps.size} 个步骤`;
+      run.count.textContent = t(`${run.steps.size} 个步骤`);
     }
     if (eventKind === "tool-start") {
-      run.title.textContent = "运行中";
+      run.title.textContent = t("运行中");
       step.command.textContent = toolCommand(toolName, toolArguments, message.content);
       step.argumentsOutput.textContent = formatToolValue(toolArguments ?? parseArgumentsFromCall(message.content, toolName));
-      step.resultOutput.textContent = "等待工具输出…";
+      step.resultOutput.textContent = t("等待工具输出…");
       this.setToolStepStatus(step, "running");
     } else {
       if (step.command.textContent === toolName) step.command.textContent = toolCommand(toolName, toolArguments, "");
       step.resultOutput.textContent = formatToolValue(message.content);
       this.setToolStepStatus(step, eventKind === "error" ? "failed" : "completed");
-      if (eventKind === "error" && run.status === "running") run.title.textContent = "步骤失败，正在重新规划";
+      if (eventKind === "error" && run.status === "running") run.title.textContent = t("步骤失败，正在重新规划");
     }
   }
 
@@ -561,10 +622,10 @@ export class AppUi {
     const header = element("summary", "tool-run-header");
     const heading = element("div", "tool-run-heading");
     const indicator = element("span", "tool-run-indicator running", "");
-    const title = element("strong", "", "运行中");
-    const count = element("span", "tool-run-count", "0 个步骤");
+    const title = element("strong", "", t("运行中"));
+    const count = element("span", "tool-run-count", t("0 个步骤"));
     heading.append(indicator, title, count);
-    header.append(heading, element("span", "tool-run-hint", "点击展开或收起"));
+    header.append(heading, element("span", "tool-run-hint", t("点击展开或收起")));
     const stepList = element("div", "tool-step-list");
     details.append(header, stepList);
     article.append(details);
@@ -583,16 +644,16 @@ export class AppUi {
     const summary = element("summary", "tool-step-summary");
     const chevron = element("span", "tool-step-chevron", "›");
     const command = element("code", "tool-step-command", toolName);
-    const stateLabel = element("span", "tool-step-state", "运行中");
+    const stateLabel = element("span", "tool-step-state", t("运行中"));
     summary.append(chevron, command, stateLabel);
     const body = element("div", "tool-step-body");
     const argumentsSection = element("section", "tool-step-section");
-    argumentsSection.append(element("div", "tool-step-label", "调用参数"));
+    argumentsSection.append(element("div", "tool-step-label", t("调用参数")));
     const argumentsOutput = element("pre", "tool-step-output", "—");
     argumentsSection.append(argumentsOutput);
     const resultSection = element("section", "tool-step-section");
-    resultSection.append(element("div", "tool-step-label", "输出"));
-    const resultOutput = element("pre", "tool-step-output pending", "等待工具输出…");
+    resultSection.append(element("div", "tool-step-label", t("输出")));
+    const resultOutput = element("pre", "tool-step-output pending", t("等待工具输出…"));
     resultSection.append(resultOutput);
     body.append(argumentsSection, resultSection);
     details.append(summary, body);
@@ -603,11 +664,23 @@ export class AppUi {
   private setToolStepStatus(step: ToolStepMount, status: ToolStepStatus): void {
     step.status = status;
     step.details.dataset.status = status;
-    step.stateLabel.textContent = status === "running" ? "运行中" : status === "completed" ? "已完成" : "失败";
+    step.stateLabel.textContent = t(status === "running" ? "运行中" : status === "completed" ? "已完成" : "失败");
     step.resultOutput.classList.toggle("pending", status === "running");
   }
 
   appendAssistantDelta(delta: string): void {
+    if (!delta) return;
+    this.pendingAssistantDelta += delta;
+    if (this.assistantDeltaFrame !== undefined) return;
+    this.assistantDeltaFrame = requestAnimationFrame(() => {
+      this.assistantDeltaFrame = undefined;
+      this.flushAssistantDelta();
+    });
+  }
+
+  private flushAssistantDelta(): void {
+    const delta = this.pendingAssistantDelta;
+    this.pendingAssistantDelta = "";
     if (!delta) return;
     if (!this.streamingAssistant) {
       this.emptyState.hidden = true;
@@ -620,6 +693,9 @@ export class AppUi {
   }
 
   completeAssistantMessage(message: MessageRecord): void {
+    if (this.assistantDeltaFrame !== undefined) cancelAnimationFrame(this.assistantDeltaFrame);
+    this.assistantDeltaFrame = undefined;
+    this.flushAssistantDelta();
     const streaming = this.streamingAssistant;
     if (!streaming) { this.appendMessage(message); return; }
     streaming.state.content = message.content;
@@ -631,6 +707,9 @@ export class AppUi {
   }
 
   discardAssistantStream(): void {
+    if (this.assistantDeltaFrame !== undefined) cancelAnimationFrame(this.assistantDeltaFrame);
+    this.assistantDeltaFrame = undefined;
+    this.pendingAssistantDelta = "";
     const streaming = this.streamingAssistant;
     if (!streaming) return;
     this.markdownApps.get(streaming.host)?.unmount();
@@ -682,7 +761,7 @@ export class AppUi {
   }
 
   setActiveThread(thread: ThreadRecord | undefined, project: ProjectRecord | undefined): void {
-    this.threadTitle.textContent = thread?.title ?? "新建任务";
+    this.threadTitle.textContent = thread?.title ?? "新建项目";
     this.threadTitle.dataset.active = thread ? "true" : "";
     this.projectLabel.textContent = project?.name ?? "选择项目文件夹开始";
     this.intent.disabled = !thread;
@@ -709,12 +788,18 @@ export class AppUi {
   }
 
   setBusy(busy: boolean, status: string): void {
-    this.intent.disabled = busy || !this.threadTitle.dataset.active;
-    this.send.disabled = busy || !this.threadTitle.dataset.active;
-    this.send.textContent = busy ? "…" : "↑";
-    this.composerStatus.textContent = status;
+    const active = Boolean(this.threadTitle.dataset.active);
+    this.intent.disabled = !active;
+    this.send.disabled = !active;
+    this.send.textContent = busy ? "＋" : "↑";
+    this.send.title = t(busy ? "排队发送" : "发送");
+    this.send.setAttribute("aria-label", this.send.title);
+    this.composerSendMode.hidden = !busy;
+    this.composerSendMode.disabled = !busy;
+    if (!busy) this.composerSendMode.value = "steering";
+    this.composerStatus.textContent = t(status);
     this.setModelSelectorBusy(busy);
-    this.setAttachmentInputEnabled(!busy && Boolean(this.threadTitle.dataset.active));
+    this.setAttachmentInputEnabled(active);
     this.setStopAvailable(busy);
   }
 
@@ -809,25 +894,59 @@ export class AppUi {
     catch (error) { this.toast(error instanceof Error ? error.message : String(error)); }
   }
 
-  renderSkills(skills: SkillSummary[], actions: SkillActions = {}): void {
-    this.skillList.replaceChildren();
+  renderSkillGroups(skills: SkillSummary[], actions: SkillActions = {}): void {
+    this.renderSkillList(this.systemSkillList, skills.filter((skill) => skill.source === "builtin"), "尚无系统 Skill", actions);
+    this.renderSkillList(this.userSkillList, skills.filter((skill) => skill.source === "user" || skill.source === "generated" || skill.source === "organization"), "尚未添加用户 Skill", actions);
+    this.renderSkillList(this.projectSkillList, skills.filter((skill) => skill.source === "project"), "当前项目尚无 Skill", actions);
+  }
+
+  renderMcpServers(servers: McpServerRecord[], actions: McpServerActions = {}): void {
+    this.mcpServerList.replaceChildren();
+    for (const server of servers) {
+      const item = element("article", "mcp-server-item");
+      const heading = element("header");
+      heading.append(
+        element("strong", "", server.name),
+        element("span", `skill-state ${server.enabled ? "enabled" : "disabled"}`, server.enabled ? "已启用" : "已禁用")
+      );
+      item.append(heading, element("code", "mcp-server-url", server.url));
+      const status = server.lastError
+        ? `测试失败：${server.lastError}`
+        : server.lastTestedAt
+          ? `连接正常 · ${server.lastToolCount ?? 0} 个工具 · ${formatLogTimestamp(server.lastTestedAt)}`
+          : "尚未测试";
+      item.append(element("span", `mcp-server-status${server.lastError ? " error" : ""}`, status));
+      const buttons = element("div", "item-actions");
+      appendActionButton(buttons, "测试连接", Boolean(actions.test), () => this.runUiAction(() => actions.test?.(server.id)));
+      appendActionButton(buttons, server.enabled ? "禁用" : "启用", Boolean(actions.setEnabled), () => this.runUiAction(() => actions.setEnabled?.(server.id, !server.enabled)));
+      appendActionButton(buttons, "移除", Boolean(actions.remove), () => this.runUiAction(() => actions.remove?.(server.id)));
+      item.append(buttons);
+      this.mcpServerList.append(item);
+    }
+    if (!servers.length) this.mcpServerList.append(element("div", "sidebar-empty", "尚未配置 MCP Server"));
+  }
+
+  private renderSkillList(host: HTMLElement, skills: SkillSummary[], emptyText: string, actions: SkillActions): void {
+    host.replaceChildren();
     for (const skill of skills) {
+      const reference = skill.key ?? skill.id;
       const item = element("div", "skill-item");
       const heading = element("div", "skill-heading");
-      heading.append(element("strong", "", `${skill.name} · ${skill.source}${skill.version ? ` · v${skill.version}` : ""}`), element("span", `skill-state ${skill.enabled === false ? "disabled" : "enabled"}`, skill.enabled === false ? "已禁用" : "已启用"));
+      heading.append(element("strong", "", `${skill.name}${skill.version ? ` · v${skill.version}` : ""}`), element("span", `skill-state ${skill.enabled === false ? "disabled" : "enabled"}`, skill.enabled === false ? "已禁用" : "已启用"));
       item.append(heading, element("span", "skill-description", skill.description));
       const permissions = element("div", "skill-permissions");
       for (const permission of skill.permissions ?? []) permissions.append(element("span", "", skillPermissionLabel(permission)));
       if (!skill.permissions?.length) permissions.append(element("span", "safe", "无需额外权限"));
       item.append(permissions);
+      if (skill.source === "project") item.append(element("div", "skill-source-note", "来源：当前项目 .browser-agent/skills"));
       const buttons = element("div", "item-actions");
-      appendActionButton(buttons, "查看", Boolean(actions.inspect), () => this.runUiAction(() => actions.inspect?.(skill.id)));
-      appendActionButton(buttons, skill.enabled === false ? "启用" : "禁用", Boolean(actions.setEnabled), () => this.runUiAction(() => actions.setEnabled?.(skill.id, skill.enabled === false)));
-      appendActionButton(buttons, "卸载", Boolean(actions.uninstall), () => this.runUiAction(() => actions.uninstall?.(skill.id)));
+      appendActionButton(buttons, "查看", Boolean(actions.inspect), () => this.runUiAction(() => actions.inspect?.(reference)));
+      appendActionButton(buttons, skill.enabled === false ? "启用" : "禁用", Boolean(actions.setEnabled), () => this.runUiAction(() => actions.setEnabled?.(reference, skill.enabled === false)));
+      if (skill.source !== "builtin" && skill.source !== "project") appendActionButton(buttons, "卸载", Boolean(actions.uninstall), () => this.runUiAction(() => actions.uninstall?.(reference)));
       item.append(buttons);
-      this.skillList.append(item);
+      host.append(item);
     }
-    if (!skills.length) this.skillList.append(element("div", "sidebar-empty", "尚未安装 Skill"));
+    if (!skills.length) host.append(element("div", "sidebar-empty", emptyText));
   }
 
   renderLogs(records: AppLogRecord[]): void {
@@ -868,7 +987,7 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", 
 function option(value: string, label: string): HTMLOptionElement { const item = document.createElement("option"); item.value = value; item.textContent = label; return item; }
 function appendActionButton(host: HTMLElement, label: string, enabled: boolean, action: () => void): void { const button = element("button", "", label) as HTMLButtonElement; button.type = "button"; button.disabled = !enabled; button.addEventListener("click", action); host.append(button); }
 function metric(label: string, value: string): HTMLElement { const item = element("span"); item.append(element("small", "", label), element("strong", "", value)); return item; }
-function eventTitle(message: MessageRecord): string { if (message.kind === "terminal") return "终端记录"; if (message.kind === "error") return "执行错误"; return typeof message.metadata?.toolName === "string" ? message.metadata.toolName : "Agent 工具"; }
+function eventTitle(message: MessageRecord): string { if (message.kind === "terminal") return t("终端记录"); if (message.kind === "error") return t("执行错误"); return typeof message.metadata?.toolName === "string" ? message.metadata.toolName : t("Agent 工具"); }
 function formatTime(value: string): string { try { return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value)); } catch { return ""; } }
 function formatLogTimestamp(value: string): string { try { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hour12: false }).format(new Date(value)); } catch { return value; } }
 function formatLogDetails(record: AppLogRecord): string {
@@ -903,11 +1022,11 @@ function formatShortDate(value: string): string {
 }
 
 function runStatusLabel(status: RunCenterItem["status"]): string {
-  return { running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断" }[status];
+  return { running: "运行中", paused: "已暂停", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断" }[status];
 }
 
 function changeSetStatusLabel(status: ChangeSetListItem["status"]): string {
-  return { active: "记录中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断", restored: "已恢复" }[status];
+  return { active: "记录中", paused: "已暂停", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断", restored: "已恢复" }[status];
 }
 
 function skillPermissionLabel(permission: NonNullable<SkillSummary["permissions"]>[number]): string {

@@ -25,6 +25,7 @@ test("图片选择仅接受受支持格式并执行单图与消息总量限制",
 
 test("工具运行折叠策略区分运行、失败、历史成功和用户展开", () => {
   assert.equal(toolRunShouldBeOpen("running"), true);
+  assert.equal(toolRunShouldBeOpen("paused"), true);
   assert.equal(toolRunShouldBeOpen("failed"), true);
   assert.equal(toolRunShouldBeOpen("completed"), false);
   assert.equal(toolRunShouldBeOpen("completed", true), true);

@@ -1,10 +1,25 @@
 import type { AppLogLevel } from "../../logging/src/index";
+import type { AgentRunMetrics, RuntimeErrorRecord } from "../../agent-kernel/src/index";
 
 export type ProjectPermissionHint = "granted" | "prompt" | "denied" | "missing";
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageKind = "user" | "assistant" | "tool" | "terminal" | "error";
 export type CapabilityState = "supported" | "unsupported" | "unknown";
 export type ProviderKind = "openai" | "deepseek" | "gateway" | "openai-compatible";
+export type RunStatus = "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
+export type QueuedMessageKind = "steering" | "follow-up";
+export type QueuedMessageStatus = "pending" | "delivered" | "consumed" | "withdrawn";
+
+export interface QueuedMessageMetadata extends Record<string, unknown> {
+  queueKind: QueuedMessageKind;
+  queueStatus: QueuedMessageStatus;
+  queuedAt: string;
+  runId?: string;
+  deliveredAt?: string;
+  consumedAt?: string;
+  withdrawnAt?: string;
+  attachments?: Array<{ id: string; name: string; mimeType: string; size: number }>;
+}
 
 export interface ModelCapabilities {
   toolCalling: CapabilityState;
@@ -105,7 +120,7 @@ export interface MessageRecord {
 export interface RunRecord {
   id: string;
   threadId: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  status: RunStatus;
   intent: string;
   providerMode?: ModelSettingsRecord["mode"];
   model?: string;
@@ -113,9 +128,30 @@ export interface RunRecord {
   retryOf?: string;
   inputMessageId?: string;
   changeSetId?: string;
+  checkpoint?: unknown;
+  metrics?: AgentRunMetrics;
+  completedToolCallIds?: string[];
+  outputPaths?: string[];
+  runtimeErrors?: RuntimeErrorRecord[];
+  resumeGroupId?: string;
+  resumeOfRunId?: string;
+  settledAt?: string;
   events: Array<{ at: string; kind: "phase" | "tool" | "error"; content: string; eventKind?: "tool-start" | "tool-result" | "error"; toolName?: string; networkHost?: string }>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ModelProbeRecord {
+  id: string;
+  providerProfileId: string;
+  modelId: string;
+  endpointOrigin: string;
+  text: boolean;
+  toolCalling: boolean;
+  imageInput: boolean;
+  streaming: boolean;
+  testedAt: string;
+  details?: Record<string, string>;
 }
 
 export interface ModelSettingsRecord {
@@ -137,4 +173,22 @@ export interface ModelsDevCacheRecord {
   etag?: string;
   fetchedAt: string;
   catalog: unknown;
+}
+
+export interface McpServerRecord {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  lastTestedAt?: string;
+  lastToolCount?: number;
+  lastError?: string;
+  cachedTools?: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpSettingsRecord {
+  key: "mcp-servers";
+  servers: McpServerRecord[];
 }

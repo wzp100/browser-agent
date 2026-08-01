@@ -24,6 +24,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: corepack pnpm@11.7.0 install --frozen-lockfile
+      - name: Check version consistency
+        run: corepack pnpm@11.7.0 version:check
       - name: Typecheck
         run: corepack pnpm@11.7.0 typecheck
       - name: Test
@@ -40,6 +42,8 @@ jobs:
         run: corepack pnpm@11.7.0 exec playwright install --with-deps chromium
       - name: Browser E2E
         run: corepack pnpm@11.7.0 test:e2e
+      - name: Real WebContainer E2E
+        run: corepack pnpm@11.7.0 test:runtime
       - name: Office and PDF artifact validation
         run: corepack pnpm@11.7.0 verify:office
 

@@ -1,9 +1,9 @@
 import type { ModelSettingsRecord, ProviderProfile, ThreadRecord } from "./types";
 
-export type StoreName = "projects" | "threads" | "messages" | "runs" | "settings" | "logs" | "providerProfiles" | "attachments";
+export type StoreName = "projects" | "threads" | "messages" | "runs" | "settings" | "logs" | "providerProfiles" | "attachments" | "modelProbes";
 
 const DATABASE_NAME = "browser-agent-runtime";
-const DATABASE_VERSION = 6;
+const DATABASE_VERSION = 7;
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -83,6 +83,10 @@ export class BrowserDatabase {
                 }
               };
             }
+          }
+          if (!database.objectStoreNames.contains("modelProbes")) {
+            const store = database.createObjectStore("modelProbes", { keyPath: "id" });
+            store.createIndex("providerModel", ["providerProfileId", "modelId"], { unique: false });
           }
           for (const obsolete of ["tasks", "transactions"]) {
             if (database.objectStoreNames.contains(obsolete)) database.deleteObjectStore(obsolete);

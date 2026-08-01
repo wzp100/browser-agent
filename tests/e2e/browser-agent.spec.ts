@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { APP_VERSION } from "../../packages/version";
 
 const MOCK_GATEWAY = "http://127.0.0.1:4173/mock-gateway";
 const PNG_1X1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -79,18 +80,63 @@ test("模型切换、图片发送与成功运行自动折叠", async ({ page }) 
   expect(user.content.some((part) => part.type === "image" && part.mimeType === "image/png")).toBe(true);
 });
 
-test("失败运行保持展开，停止运行记录为 cancelled", async ({ page }) => {
+test("插件入口管理系统、用户、项目 Skills 与 MCP 配置", async ({ page }) => {
+  await expect(page.locator("#new-project")).toContainText("新建项目");
+  await page.locator("#settings-trigger").click();
+  await expect(page.locator("#settings-dialog h2", { hasText: "Skills" })).toHaveCount(0);
+  await page.locator("#settings-dialog button[aria-label='关闭']").click();
+
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const project = await root.getDirectoryHandle("browser-agent-e2e");
+    const home = await project.getDirectoryHandle(".browser-agent", { create: true });
+    const skills = await home.getDirectoryHandle("skills", { create: true });
+    const folder = await skills.getDirectoryHandle("project-e2e", { create: true });
+    const handle = await folder.getFileHandle("SKILL.md", { create: true });
+    const writer = await handle.createWritable();
+    await writer.write("---\nname: project-e2e\ndescription: 项目 E2E Skill\n---\n# Project E2E\n");
+    await writer.close();
+  });
+
+  await page.locator("#plugins-trigger").click();
+  await expect(page.locator("#system-skill-list .skill-item").first()).toBeVisible();
+  await expect(page.locator("#user-skill-list")).toContainText("尚未添加用户 Skill");
+  await page.locator("#refresh-project-skills").click();
+  await expect(page.locator("#project-skill-list")).toContainText("project-e2e");
+  await expect(page.locator("#project-skill-list")).toContainText("项目 E2E Skill");
+
+  await page.locator("#mcp-name").fill("E2E MCP");
+  await page.locator("#mcp-url").fill("https://mcp.example.test/mcp");
+  await page.locator("#add-mcp-server").click();
+  await expect(page.locator("#mcp-server-list")).toContainText("E2E MCP");
+  await expect(page.locator("#mcp-server-list")).toContainText("尚未测试");
+});
+
+test("窄屏聊天区不被连接状态撑宽且设置显示版本", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => {
+    const selectors = [".chat-header", ".chat-scroll", "#message-feed", ".composer", ".terminal-pane"];
+    return selectors.every((selector) => (document.querySelector(selector)?.getBoundingClientRect().right ?? Infinity) <= innerWidth + 0.5);
+  })).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.locator("#settings-trigger").click();
+  await expect(page.locator("#app-version")).toHaveText(`v${APP_VERSION}`);
+});
+
+test("重复失败运行暂停并保持展开，停止运行记录为 cancelled", async ({ page }) => {
   page.on("dialog", (dialog) => dialog.accept());
   await page.locator("#intent").fill("[E2E:FAIL] 触发可重复的工具失败。");
   await page.locator("#send").click();
-  await expect(page.locator(".message.error").last()).toBeVisible();
-  const failedRun = page.locator(".tool-run").last();
-  await expect(failedRun).toHaveAttribute("data-status", "failed");
-  await expect(failedRun.locator(".tool-run-card")).toHaveAttribute("open", "");
+  const pausedRun = page.locator(".tool-run").last();
+  await expect(pausedRun).toHaveAttribute("data-status", "paused");
+  await expect(pausedRun.locator(".tool-run-card")).toHaveAttribute("open", "");
 
   await page.locator("#intent").fill("[E2E:SLOW] 保持运行直到用户停止。");
   await page.locator("#send").click();
   await expect(page.locator("#stop-run")).toBeVisible();
+  await expect(page.locator("#send")).toBeVisible();
+  await expect(page.locator("#composer-send-mode")).toBeVisible();
+  await expect(page.locator("#send")).toHaveAttribute("aria-label", "排队发送");
   await page.locator("#stop-run").click();
   await expect(page.locator(".message.error").last()).toContainText("用户停止");
   await page.locator("#run-panel-trigger").click();
@@ -216,7 +262,7 @@ async function workspaceFileSize(page: Page, name: string): Promise<number> {
 }
 
 function chooseTurn(intent: string, toolResults: number): GatewayTurn {
-  if (intent.includes("[E2E:FAIL]")) return { text: "", toolCalls: [{ id: `missing-${toolResults}`, name: "workspace.read", arguments: { path: `/missing-${toolResults}.txt` } }] };
+  if (intent.includes("[E2E:FAIL]")) return { text: "", toolCalls: [{ id: `missing-${toolResults}`, name: "workspace.read", arguments: { path: "/missing.txt" } }] };
   if (intent.includes("[E2E:WRITE]")) return toolResults
     ? { text: "已根据工具结果创建文件。", toolCalls: [] }
     : { text: "", toolCalls: [{ id: "write-report", name: "workspace.write", arguments: { path: "/report.txt", content: "Browser Agent E2E\n" } }] };

@@ -180,7 +180,7 @@ export function validateProjectBackup(value: unknown, limits: ProjectBackupLimit
   uniqueIds(runs, "runs");
   for (const entry of runs) {
     if (!threadIds.has(requiredString(entry.threadId, "run.threadId"))) throw new Error("运行记录引用了不存在的对话。 ");
-    oneOf(entry.status, ["running", "completed", "failed", "cancelled", "interrupted"], "run.status");
+    oneOf(entry.status, ["running", "paused", "completed", "failed", "cancelled", "interrupted"], "run.status");
     if (typeof entry.intent !== "string") throw new Error("项目备份 run.intent 必须是字符串。 ");
     if (!Array.isArray(entry.events)) throw new Error("项目备份 run.events 必须是数组。 ");
     requiredString(entry.createdAt, "run.createdAt");
@@ -210,7 +210,7 @@ export function validateProjectBackup(value: unknown, limits: ProjectBackupLimit
   for (const entry of changeSets) {
     if (requiredString(entry.projectId, "changeSet.projectId") !== projectId) throw new Error("ChangeSet 不属于备份项目。 ");
     requiredString(entry.runId, "changeSet.runId");
-    oneOf(entry.status, ["active", "completed", "failed", "cancelled", "interrupted", "restored"], "changeSet.status");
+    oneOf(entry.status, ["active", "paused", "completed", "failed", "cancelled", "interrupted", "restored"], "changeSet.status");
     if (!Array.isArray(entry.changes)) throw new Error("项目备份 changeSet.changes 必须是数组。 ");
     requiredString(entry.createdAt, "changeSet.createdAt");
     requiredString(entry.updatedAt, "changeSet.updatedAt");

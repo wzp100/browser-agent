@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { APP_VERSION } from "../../packages/version";
 
 const MOCK_GATEWAY = "http://127.0.0.1:4173/mock-gateway";
 const PNG_1X1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -111,18 +112,31 @@ test("插件入口管理系统、用户、项目 Skills 与 MCP 配置", async (
   await expect(page.locator("#mcp-server-list")).toContainText("尚未测试");
 });
 
-test("失败运行保持展开，停止运行记录为 cancelled", async ({ page }) => {
+test("窄屏聊天区不被连接状态撑宽且设置显示版本", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => {
+    const selectors = [".chat-header", ".chat-scroll", "#message-feed", ".composer", ".terminal-pane"];
+    return selectors.every((selector) => (document.querySelector(selector)?.getBoundingClientRect().right ?? Infinity) <= innerWidth + 0.5);
+  })).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.locator("#settings-trigger").click();
+  await expect(page.locator("#app-version")).toHaveText(`v${APP_VERSION}`);
+});
+
+test("重复失败运行暂停并保持展开，停止运行记录为 cancelled", async ({ page }) => {
   page.on("dialog", (dialog) => dialog.accept());
   await page.locator("#intent").fill("[E2E:FAIL] 触发可重复的工具失败。");
   await page.locator("#send").click();
-  await expect(page.locator(".message.error").last()).toBeVisible();
-  const failedRun = page.locator(".tool-run").last();
-  await expect(failedRun).toHaveAttribute("data-status", "failed");
-  await expect(failedRun.locator(".tool-run-card")).toHaveAttribute("open", "");
+  const pausedRun = page.locator(".tool-run").last();
+  await expect(pausedRun).toHaveAttribute("data-status", "paused");
+  await expect(pausedRun.locator(".tool-run-card")).toHaveAttribute("open", "");
 
   await page.locator("#intent").fill("[E2E:SLOW] 保持运行直到用户停止。");
   await page.locator("#send").click();
   await expect(page.locator("#stop-run")).toBeVisible();
+  await expect(page.locator("#send")).toBeVisible();
+  await expect(page.locator("#composer-send-mode")).toBeVisible();
+  await expect(page.locator("#send")).toHaveAttribute("aria-label", "排队发送");
   await page.locator("#stop-run").click();
   await expect(page.locator(".message.error").last()).toContainText("用户停止");
   await page.locator("#run-panel-trigger").click();
@@ -248,7 +262,7 @@ async function workspaceFileSize(page: Page, name: string): Promise<number> {
 }
 
 function chooseTurn(intent: string, toolResults: number): GatewayTurn {
-  if (intent.includes("[E2E:FAIL]")) return { text: "", toolCalls: [{ id: `missing-${toolResults}`, name: "workspace.read", arguments: { path: `/missing-${toolResults}.txt` } }] };
+  if (intent.includes("[E2E:FAIL]")) return { text: "", toolCalls: [{ id: `missing-${toolResults}`, name: "workspace.read", arguments: { path: "/missing.txt" } }] };
   if (intent.includes("[E2E:WRITE]")) return toolResults
     ? { text: "已根据工具结果创建文件。", toolCalls: [] }
     : { text: "", toolCalls: [{ id: "write-report", name: "workspace.write", arguments: { path: "/report.txt", content: "Browser Agent E2E\n" } }] };

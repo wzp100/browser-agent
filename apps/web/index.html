@@ -76,6 +76,10 @@
                   <button id="refresh-models" class="composer-tool-button icon-only" type="button" aria-label="刷新模型列表" title="刷新模型列表" disabled>↻</button>
                 </div>
                 <div class="composer-actions">
+                  <select id="composer-send-mode" class="composer-send-mode" aria-label="运行中消息发送方式" title="选择消息是引导当前任务，还是在当前任务完成后执行" hidden>
+                    <option value="steering">引导当前任务</option>
+                    <option value="follow-up">完成后执行</option>
+                  </select>
                   <span id="composer-status">请选择项目文件夹</span>
                   <button id="stop-run" class="stop-button" type="button" aria-label="停止运行" title="停止当前运行" hidden disabled>■</button>
                   <button id="send" class="send-button" type="button" aria-label="发送" disabled>↑</button>
@@ -117,7 +121,7 @@
     <dialog id="settings-dialog" class="settings-dialog">
       <form method="dialog" class="settings-shell">
         <header class="settings-header">
-          <div><strong>设置</strong><span>所有配置均在浏览器中完成</span></div>
+          <div><strong>设置</strong><span>所有配置均在浏览器中完成 · <span id="app-version"></span></span></div>
           <button class="icon-button" value="cancel" aria-label="关闭">×</button>
         </header>
         <div class="settings-content">

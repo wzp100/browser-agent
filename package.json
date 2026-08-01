@@ -1,7 +1,7 @@
 {
   "name": "browser-agent",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.1.0",
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -16,9 +16,13 @@
     "test": "tsx --test tests/**/*.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
+    "test:runtime": "playwright test -c playwright.runtime.config.ts",
+    "test:runtime:headed": "playwright test -c playwright.runtime.config.ts --headed",
     "test:e2e:install": "playwright install chromium",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs",
+    "version:check": "node scripts/set-version.mjs --check",
+    "version:set": "node scripts/set-version.mjs",
     "cloudflare:whoami": "wrangler whoami",
     "cloudflare:inspect": "wrangler pages deployment list --project-name browser-agent-wzp100-app",
     "cloudflare:dev": "pnpm build && wrangler pages dev apps/web/dist",
@@ -26,12 +30,11 @@
     "cloudflare:deploy:production": "pnpm build && wrangler pages deploy apps/web/dist --project-name browser-agent-wzp100-app --branch main",
     "verify:office": "tsx scripts/verify-office-artifacts.ts",
     "verify:office:strict": "tsx scripts/verify-office-artifacts.ts --strict",
-    "verify": "pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm audit --prod && pnpm build && pnpm check:bundle && pnpm test:e2e && pnpm verify:office"
+    "verify": "pnpm version:check && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm audit --prod && pnpm build && pnpm check:bundle && pnpm test:e2e && pnpm test:runtime && pnpm verify:office"
   },
   "dependencies": {
     "@langchain/core": "^1.2.2",
     "@langchain/deepseek": "^1.1.5",
-    "@langchain/langgraph": "^1.4.7",
     "@langchain/openai": "^1.5.5",
     "@webcontainer/api": "^1.6.1",
     "@xterm/addon-fit": "^0.10.0",

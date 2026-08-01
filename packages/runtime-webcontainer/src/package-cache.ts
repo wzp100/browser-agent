@@ -2,7 +2,7 @@ import { BROWSER_AGENT_PACKAGE_DIRECTORY } from "../../workspace-contracts/src/i
 
 export const RUNTIME_NODE_MODULES_DIRECTORY = "/node_modules";
 
-export function runtimePackageEnvironment(workdir = "/workspace"): Record<string, string> {
+export function runtimePackageEnvironment(workdir: string): Record<string, string> {
   const root = `${workdir.replace(/\/$/, "")}${BROWSER_AGENT_PACKAGE_DIRECTORY}`;
   return {
     npm_config_cache: `${root}/npm-cache`,

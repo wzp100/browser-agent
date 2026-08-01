@@ -1,10 +1,25 @@
 import type { AppLogLevel } from "../../logging/src/index";
+import type { AgentRunMetrics, RuntimeErrorRecord } from "../../agent-kernel/src/index";
 
 export type ProjectPermissionHint = "granted" | "prompt" | "denied" | "missing";
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageKind = "user" | "assistant" | "tool" | "terminal" | "error";
 export type CapabilityState = "supported" | "unsupported" | "unknown";
 export type ProviderKind = "openai" | "deepseek" | "gateway" | "openai-compatible";
+export type RunStatus = "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
+export type QueuedMessageKind = "steering" | "follow-up";
+export type QueuedMessageStatus = "pending" | "delivered" | "consumed" | "withdrawn";
+
+export interface QueuedMessageMetadata extends Record<string, unknown> {
+  queueKind: QueuedMessageKind;
+  queueStatus: QueuedMessageStatus;
+  queuedAt: string;
+  runId?: string;
+  deliveredAt?: string;
+  consumedAt?: string;
+  withdrawnAt?: string;
+  attachments?: Array<{ id: string; name: string; mimeType: string; size: number }>;
+}
 
 export interface ModelCapabilities {
   toolCalling: CapabilityState;
@@ -105,7 +120,7 @@ export interface MessageRecord {
 export interface RunRecord {
   id: string;
   threadId: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  status: RunStatus;
   intent: string;
   providerMode?: ModelSettingsRecord["mode"];
   model?: string;
@@ -114,6 +129,13 @@ export interface RunRecord {
   inputMessageId?: string;
   changeSetId?: string;
   checkpoint?: unknown;
+  metrics?: AgentRunMetrics;
+  completedToolCallIds?: string[];
+  outputPaths?: string[];
+  runtimeErrors?: RuntimeErrorRecord[];
+  resumeGroupId?: string;
+  resumeOfRunId?: string;
+  settledAt?: string;
   events: Array<{ at: string; kind: "phase" | "tool" | "error"; content: string; eventKind?: "tool-start" | "tool-result" | "error"; toolName?: string; networkHost?: string }>;
   createdAt: string;
   updatedAt: string;

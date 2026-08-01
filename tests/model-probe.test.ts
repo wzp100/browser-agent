@@ -44,3 +44,22 @@ test("Quick Test 的单项失败不会掩盖其他能力", async () => {
   assert.equal(result.imageInput, false);
   assert.match(result.details.toolCalling ?? "", /tools unsupported/);
 });
+
+test("能力目录明确不支持图片时跳过无效请求", async () => {
+  let requests = 0;
+  const provider: ModelProvider = {
+    async runTurn(request, onTextDelta) {
+      requests += 1;
+      if (requests === 1) {
+        await onTextDelta?.("OK");
+        return { text: "OK", toolCalls: [] };
+      }
+      assert.equal(request.toolChoice, "required");
+      return { text: "", toolCalls: [{ id: "probe-2", name: "diagnostic.echo", arguments: { value: "probe" } }] };
+    }
+  };
+  const result = await probeModel(provider, undefined, { imageInput: false });
+  assert.equal(requests, 2);
+  assert.equal(result.imageInput, false);
+  assert.match(result.details.imageInput ?? "", /已跳过图片请求/);
+});

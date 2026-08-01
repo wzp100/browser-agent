@@ -12,7 +12,17 @@ export interface AppLogRecord {
   context?: Record<string, unknown>;
   errorName?: string;
   errorMessage?: string;
+  errorCode?: string;
   stack?: string;
+  errorCause?: SerializedError | string;
+}
+
+export interface SerializedError {
+  name?: string;
+  message: string;
+  code?: string;
+  stack?: string;
+  cause?: SerializedError | string;
 }
 
 export interface AppLogSink {
@@ -151,7 +161,9 @@ function emit(level: AppLogLevel, scope: string, message: string, context?: LogC
   if (cleanContext && Object.keys(cleanContext).length) record.context = cleanContext;
   if (details.name) record.errorName = details.name;
   if (details.message) record.errorMessage = details.message;
+  if (details.code) record.errorCode = details.code;
   if (details.stack) record.stack = details.stack;
+  if (details.cause) record.errorCause = details.cause;
 
   const nativeLogger = getNativeLogger(scope);
   const consoleArguments: unknown[] = [`${record.timestamp} [${level.toUpperCase()}] [${scope}] ${record.message}`];
@@ -200,10 +212,55 @@ function sanitize(value: unknown, depth: number, seen: WeakSet<object>): unknown
   return result;
 }
 
-function errorDetails(error: unknown): { name?: string; message?: string; stack?: string } {
+export function serializeError(error: unknown): SerializedError {
+  return serializeErrorValue(error, 0, new WeakSet<object>());
+}
+
+function errorDetails(error: unknown): Partial<SerializedError> {
   if (error === undefined || error === null) return {};
-  if (error instanceof Error) return { name: error.name, message: sanitizeLogText(error.message), stack: sanitizeLogText(error.stack ?? "") };
-  return { message: sanitizeLogText(String(error)) };
+  return serializeError(error);
+}
+
+function serializeErrorValue(error: unknown, depth: number, seen: WeakSet<object>): SerializedError {
+  if (typeof error === "string") return { message: sanitizeLogText(error) };
+  if (error === null || error === undefined || typeof error !== "object") return { message: sanitizeLogText(String(error)) };
+  if (seen.has(error)) return { message: "[循环引用]" };
+  seen.add(error);
+
+  const record = error as Record<string, unknown>;
+  const name = stringValue(record.name);
+  const code = stringValue(record.code);
+  const stack = stringValue(record.stack);
+  const directMessage = stringValue(record.message);
+  const fallback = safeObjectMessage(error);
+  const result: SerializedError = { message: sanitizeLogText(directMessage ?? fallback) };
+  if (name) result.name = sanitizeLogText(name);
+  if (code) result.code = sanitizeLogText(code);
+  if (stack) result.stack = sanitizeLogText(stack);
+  if (record.cause !== undefined) {
+    result.cause = depth >= 3
+      ? "[超过错误原因深度限制]"
+      : typeof record.cause === "object" && record.cause !== null
+        ? serializeErrorValue(record.cause, depth + 1, seen)
+        : sanitizeLogText(String(record.cause));
+  }
+  return result;
+}
+
+function safeObjectMessage(value: object): string {
+  try {
+    const sanitized = sanitizeLogValue(value);
+    const json = JSON.stringify(sanitized);
+    if (json && json !== "{}") return json;
+  } catch {
+    // 有 getter 或代理对象抛错时仍提供稳定、非 [object Object] 的诊断。
+  }
+  const constructorName = value.constructor?.name;
+  return constructorName && constructorName !== "Object" ? `[${constructorName}]` : "未知对象异常";
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : typeof value === "number" ? String(value) : undefined;
 }
 
 function truncate(value: string): string { return value.length > MAX_STRING_LENGTH ? `${value.slice(0, MAX_STRING_LENGTH)}…` : value; }

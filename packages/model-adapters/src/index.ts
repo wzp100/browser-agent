@@ -18,7 +18,8 @@ export interface AgentModelMessage { role: ModelMessageRole; content: string | M
 export interface AgentModelTool { id: string; description: string; inputSchema: JsonSchema; }
 export type ModelToolChoice = "auto" | "required" | "none";
 export interface ModelTurnRequest { messages: AgentModelMessage[]; tools: AgentModelTool[]; toolChoice?: ModelToolChoice; modelId?: string; }
-export interface ModelTurnResponse { text: string; toolCalls: ModelToolCall[]; reasoningContent?: string; }
+export interface ModelUsage { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number; }
+export interface ModelTurnResponse { text: string; toolCalls: ModelToolCall[]; reasoningContent?: string; usage?: ModelUsage; }
 export type ModelTextDeltaObserver = (delta: string) => void | Promise<void>;
 export interface ModelProvider { runTurn(request: ModelTurnRequest, onTextDelta?: ModelTextDeltaObserver, signal?: AbortSignal): Promise<ModelTurnResponse>; }
 

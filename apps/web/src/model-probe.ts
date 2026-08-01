@@ -10,7 +10,7 @@ export interface ModelProbeResult {
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-export async function probeModel(provider: ModelProvider, signal?: AbortSignal): Promise<ModelProbeResult> {
+export async function probeModel(provider: ModelProvider, signal?: AbortSignal, options: { imageInput?: boolean } = {}): Promise<ModelProbeResult> {
   const details: Record<string, string> = {};
   let text = false;
   let streaming = false;
@@ -57,7 +57,9 @@ export async function probeModel(provider: ModelProvider, signal?: AbortSignal):
     details.toolCalling = errorMessage(error);
   }
 
-  try {
+  if (options.imageInput === false) {
+    details.imageInput = "模型能力目录标记为不支持，已跳过图片请求";
+  } else try {
     const response = await provider.runTurn({
       messages: [{
         role: "user",

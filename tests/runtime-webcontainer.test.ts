@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runtimeCwd, runtimeFsPath } from "../packages/runtime-webcontainer/src/paths";
+import { runtimeCwd, runtimeFsPath, toContainerFsPath, toProcessRelativePath, toSpawnWorkingDirectory } from "../packages/runtime-webcontainer/src/paths";
 import { isDependencyMutationCommand, isRuntimeNodeModulesPath, runtimePackageEnvironment } from "../packages/runtime-webcontainer/src/package-cache";
 import { inspectWebContainerSupport } from "../packages/runtime-webcontainer/src/support";
 import { decodeDependencySnapshot, encodeDependencySnapshot, type DependencySnapshotLimits } from "../packages/runtime-webcontainer/src/dependency-snapshot";
-import type { FileSystemTree } from "@webcontainer/api";
+import { DependencySnapshotCoordinator, dependencySnapshotRetryDelay, type DependencySnapshotTimers } from "../packages/runtime-webcontainer/src/dependency-snapshot-state";
+import { coalesceRuntimeSyncPaths, isDirectorySignal, isRuntimeTemporaryPath, runtimeScriptPaths, shouldMirrorPath } from "../packages/runtime-webcontainer/src/workspace-mirror";
+import { serializeError } from "../packages/logging/src/index";
+import type { FileSystemTree, WebContainer } from "@webcontainer/api";
 
 test("逻辑 /workspace 路径映射到 WebContainer 文件系统根且不会重复 workdir", () => {
   assert.equal(runtimeFsPath("/workspace"), "/");
@@ -14,11 +17,150 @@ test("逻辑 /workspace 路径映射到 WebContainer 文件系统根且不会重
   assert.equal(runtimeCwd("/workspace/src"), "src");
 });
 
+test("文件 API、进程参数和 spawn cwd 使用三个明确的路径转换", () => {
+  assert.equal(toContainerFsPath("/src/中文 文件.ts"), "/src/中文 文件.ts");
+  assert.equal(toProcessRelativePath("/.browser-agent/runtime-tmp/run/a.mjs"), ".browser-agent/runtime-tmp/run/a.mjs");
+  assert.equal(toSpawnWorkingDirectory("/workspace/src"), "src");
+  assert.equal(toSpawnWorkingDirectory("."), ".");
+  assert.throws(() => toProcessRelativePath("../../outside.mjs"), /不能越过项目根目录/);
+});
+
+test("javascript 临时脚本只在 runtime-tmp 中并向 Node 暴露相对路径", () => {
+  const paths = runtimeScriptPaths("run 中文/with spaces", "exec id");
+  assert.equal(paths.fsDirectory, "/.browser-agent/runtime-tmp/run-with-spaces");
+  assert.equal(paths.fsPath, "/.browser-agent/runtime-tmp/run-with-spaces/exec-id.mjs");
+  assert.equal(paths.processPath, ".browser-agent/runtime-tmp/run-with-spaces/exec-id.mjs");
+  assert.equal(isRuntimeTemporaryPath(paths.fsPath), true);
+  assert.equal(shouldMirrorPath(paths.fsPath), false);
+});
+
+test("javascript 执行向 Node 传相对路径并在 finally 清理内部脚本", async () => {
+  const writes: string[] = [];
+  const removals: string[] = [];
+  const spawns: Array<{ command: string; args: string[]; cwd: string | undefined }> = [];
+  const container = {
+    workdir: "/home/project",
+    fs: {
+      mkdir: async () => {},
+      writeFile: async (path: string) => { writes.push(path); },
+      rm: async (path: string) => { removals.push(path); }
+    },
+    spawn: async (command: string, args: string[], options?: { cwd?: string }) => {
+      spawns.push({ command, args, cwd: options?.cwd });
+      return {
+        exit: Promise.resolve(0),
+        output: new ReadableStream<string>({ start(controller) { controller.enqueue("ok\n"); controller.close(); } }),
+        kill() {}
+      };
+    }
+  } as unknown as WebContainer;
+  const mirror = new (await import("../packages/runtime-webcontainer/src/workspace-mirror")).WorkspaceMirror();
+  Object.assign(mirror as unknown as Record<string, unknown>, { container, fileService: {} });
+
+  const result = await mirror.execute({ source: 'console.log("ok")', workingDirectory: ".", kind: "javascript" }, "run-1");
+
+  assert.deepEqual(result, { exitCode: 0, stdout: "ok\n", stderr: "" });
+  assert.equal(writes.length, 1);
+  assert.match(writes[0] ?? "", /^\/\.browser-agent\/runtime-tmp\/run-1\/.*\.mjs$/);
+  assert.equal(spawns[0]?.command, "node");
+  assert.match(spawns[0]?.args[0] ?? "", /^\.browser-agent\/runtime-tmp\/run-1\/.*\.mjs$/);
+  assert.equal(spawns[0]?.cwd, ".");
+  assert.deepEqual(removals, writes);
+});
+
+test("watcher 将 TypeMismatchError 和 EISDIR 识别为目录信号", () => {
+  assert.equal(isDirectorySignal({ name: "TypeMismatchError", message: "not a file" }), true);
+  assert.equal(isDirectorySignal({ code: "EISDIR" }), true);
+  assert.equal(isDirectorySignal(new Error("EISDIR: illegal operation on a directory")), true);
+  assert.equal(isDirectorySignal({ code: "EACCES", message: "denied" }), false);
+});
+
+test("watcher 父路径事件吸收子路径并忽略内部临时目录", () => {
+  assert.deepEqual(coalesceRuntimeSyncPaths([
+    "/src/view/button.ts",
+    "/src",
+    "/src/view",
+    "/public/logo.svg",
+    "/.browser-agent/runtime-tmp/run/a.mjs"
+  ]), ["/src", "/public/logo.svg"]);
+});
+
+test("未知对象异常可结构化显示、脱敏并保留有限 cause", () => {
+  const error = serializeError({
+    name: "SnapshotFailure",
+    code: "EWRITE",
+    message: "token=super-secret-value",
+    cause: { message: "磁盘写入失败", code: 507 }
+  });
+  assert.equal(error.name, "SnapshotFailure");
+  assert.equal(error.code, "EWRITE");
+  assert.match(error.message, /已隐藏/);
+  assert.notEqual(error.message, "[object Object]");
+  assert.deepEqual(error.cause, { message: "磁盘写入失败", code: "507" });
+  assert.notEqual(serializeError({ unexpected: true }).message, "[object Object]");
+});
+
+test("依赖快照等待 800ms quiet window，失败后按退避重试且事件不会绕过 timer", async () => {
+  const timers = new ManualSnapshotTimers();
+  let attempts = 0;
+  const failures: number[] = [];
+  const coordinator = new DependencySnapshotCoordinator(
+    async () => { attempts += 1; if (attempts === 1) throw { message: "snapshot failed", code: "EWRITE" }; },
+    ({ retryDelayMs }) => failures.push(retryDelayMs),
+    timers
+  );
+
+  coordinator.markDirty();
+  assert.equal(coordinator.state, "waiting_for_quiet");
+  assert.equal(timers.nextDelay(), 800);
+  timers.runNext();
+  await coordinator.waitForSaving();
+  assert.equal(attempts, 1);
+  assert.equal(coordinator.state, "failed_retryable");
+  assert.deepEqual(failures, [1_000]);
+  assert.equal(timers.nextDelay(), 1_000);
+
+  coordinator.markDirty();
+  assert.equal(timers.nextDelay(), 1_000);
+  timers.runNext();
+  await coordinator.waitForSaving();
+  assert.equal(attempts, 2);
+  assert.equal(coordinator.state, "clean");
+  assert.equal(coordinator.isDirty, false);
+});
+
+test("依赖快照保存期间的新变化重新等待 quiet window，取消会阻止未开始任务", async () => {
+  const timers = new ManualSnapshotTimers();
+  let finishSave: (() => void) | undefined;
+  let attempts = 0;
+  const coordinator = new DependencySnapshotCoordinator(
+    () => new Promise<void>((resolve) => { attempts += 1; finishSave = resolve; }),
+    () => {},
+    timers
+  );
+  coordinator.markDirty();
+  timers.runNext();
+  coordinator.markDirty();
+  finishSave?.();
+  await coordinator.waitForSaving();
+  assert.equal(attempts, 1);
+  assert.equal(coordinator.state, "waiting_for_quiet");
+  assert.equal(timers.nextDelay(), 800);
+  coordinator.cancelPending();
+  assert.equal(timers.count(), 0);
+  assert.equal(coordinator.state, "dirty");
+  assert.equal(coordinator.isDirty, true);
+});
+
+test("依赖快照退避上限为 30 秒", () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 10].map(dependencySnapshotRetryDelay), [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+});
+
 test("包管理器统一使用项目级 .browser-agent 安装包缓存", () => {
-  const environment = runtimePackageEnvironment("/workspace");
-  assert.equal(environment.npm_config_cache, "/workspace/.browser-agent/packages/npm-cache");
-  assert.equal(environment.npm_config_store_dir, "/workspace/.browser-agent/packages/pnpm-store");
-  assert.equal(environment.YARN_CACHE_FOLDER, "/workspace/.browser-agent/packages/yarn-cache");
+  const environment = runtimePackageEnvironment("/home/project");
+  assert.equal(environment.npm_config_cache, "/home/project/.browser-agent/packages/npm-cache");
+  assert.equal(environment.npm_config_store_dir, "/home/project/.browser-agent/packages/pnpm-store");
+  assert.equal(environment.YARN_CACHE_FOLDER, "/home/project/.browser-agent/packages/yarn-cache");
   assert.equal(environment.npm_config_prefer_offline, "true");
 });
 
@@ -100,3 +242,24 @@ test("非安全上下文给出 localhost 或 HTTPS 恢复提示", () => {
   assert.equal(unsupported.supported, false);
   assert.match(unsupported.message ?? "", /127\.0\.0\.1|HTTPS/);
 });
+
+class ManualSnapshotTimers implements DependencySnapshotTimers {
+  private nextId = 0;
+  private readonly pending = new Map<number, { callback: () => void; delayMs: number }>();
+
+  set(callback: () => void, delayMs: number): number {
+    const id = ++this.nextId;
+    this.pending.set(id, { callback, delayMs });
+    return id;
+  }
+
+  clear(handle: unknown): void { this.pending.delete(handle as number); }
+  count(): number { return this.pending.size; }
+  nextDelay(): number | undefined { return this.pending.values().next().value?.delayMs; }
+  runNext(): void {
+    const next = this.pending.entries().next().value as [number, { callback: () => void; delayMs: number }] | undefined;
+    if (!next) throw new Error("没有待执行的 timer");
+    this.pending.delete(next[0]);
+    next[1].callback();
+  }
+}

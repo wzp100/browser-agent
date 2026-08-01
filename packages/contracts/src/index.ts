@@ -1,4 +1,4 @@
-export type TaskPhase = "CREATED" | "INITIALIZING" | "DISCOVERING" | "RUNNING" | "VALIDATING" | "COMPLETED" | "FAILED_RECOVERABLE";
+export type TaskPhase = "CREATED" | "INITIALIZING" | "DISCOVERING" | "RUNNING" | "VALIDATING" | "PAUSED" | "ABORTED" | "COMPLETED" | "FAILED_RECOVERABLE";
 
 export interface TaskState {
   taskId: string;

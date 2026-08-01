@@ -90,6 +90,22 @@ test("排队消息可原位更新并撤回", async () => {
   assert.equal((await conversations.messages("thread-queue")).length, 0);
 });
 
+test("Steering 与 Follow-up 使用显式可恢复状态机", async () => {
+  const conversations = new ConversationRepository(new BrowserDatabase());
+  const now = new Date().toISOString();
+  await conversations.putThread({ id: "thread-queue-state", projectId: "project-1", title: "队列状态", createdAt: now, updatedAt: now });
+  const steering = await conversations.appendMessage({ threadId: "thread-queue-state", role: "user", kind: "user", content: "改用中文", metadata: { queueKind: "steering", queueStatus: "pending", queuedAt: now, runId: "run-1" } });
+  const followUp = await conversations.appendMessage({ threadId: "thread-queue-state", role: "user", kind: "user", content: "完成后总结", metadata: { queueKind: "follow-up", queueStatus: "pending", queuedAt: now } });
+  assert.deepEqual((await conversations.queuedMessages("thread-queue-state", "steering")).map((item) => item.id), [steering.id]);
+  const delivered = await conversations.transitionQueuedMessage(steering.id, "delivered", "run-1");
+  assert.equal(delivered.metadata?.queueStatus, "delivered");
+  const consumed = await conversations.transitionQueuedMessage(steering.id, "consumed", "run-1");
+  assert.equal(consumed.metadata?.queueStatus, "consumed");
+  const withdrawn = await conversations.transitionQueuedMessage(followUp.id, "withdrawn");
+  assert.equal(withdrawn.metadata?.queueStatus, "withdrawn");
+  await assert.rejects(() => conversations.transitionQueuedMessage(followUp.id, "delivered"), /不能从 withdrawn/);
+});
+
 test("模型 Quick Test 结果按供应商和模型读取最新记录", async () => {
   const probes = new ModelProbeRepository(new BrowserDatabase());
   await probes.put({ id: "probe-old", providerProfileId: "provider", modelId: "model", endpointOrigin: "https://example.com", text: true, toolCalling: false, imageInput: false, streaming: true, testedAt: "2026-07-25T00:00:00.000Z" });

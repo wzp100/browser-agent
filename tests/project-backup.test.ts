@@ -48,6 +48,13 @@ test("项目备份在 commit 前拒绝未知版本、超限、敏感字段和悬
   assert.equal(commits, 0);
 });
 
+test("项目备份接受可恢复的 paused RunRecord 与 ChangeSet", async () => {
+  const value = parseProjectBackup(await serializeProjectBackup(backupSource())) as unknown as Record<string, unknown>;
+  (value.runs as Array<Record<string, unknown>>)[0]!.status = "paused";
+  (value.changeSets as Array<Record<string, unknown>>)[0]!.status = "paused";
+  assert.doesNotThrow(() => validateProjectBackup(value));
+});
+
 function backupSource(): ProjectBackupSource {
   return {
     project: {

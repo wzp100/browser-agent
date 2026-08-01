@@ -1,5 +1,6 @@
 import type { AgentToolRegistry, JsonSchema } from "../../command-core/src/index";
 import type { McpServerRecord } from "../../persistence/src/index";
+import { APP_VERSION } from "../../version";
 
 export interface McpToolDescriptor {
   name: string;
@@ -50,7 +51,7 @@ export class McpHttpClient {
     const response = await this.request("initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: "browser-agent", version: "0.3.0" }
+      clientInfo: { name: "browser-agent", version: APP_VERSION }
     }, signal);
     const result = asRecord(response.result);
     if (typeof result?.protocolVersion !== "string") throw new Error(`MCP Server“${this.server.name}”初始化响应无效。`);

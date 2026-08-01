@@ -1,10 +1,11 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import type { AgentEvent } from "../../../packages/agent-kernel/src/index";
-import { chunkContextMessagesForSummary, selectContextMessages } from "../../../packages/context-manager/src/index";
+import type { AgentCheckpointV2, AgentEvent, SteeringRecord } from "../../../packages/agent-kernel/src/index";
+import { AgentSession, shouldAutoStartFollowUp } from "../../../packages/agent-session/src/index";
+import { chunkContextMessagesForSummary, formatAgentTaskCompactionState, selectCompleteToolRounds, selectContextMessages } from "../../../packages/context-manager/src/index";
 import { composeLogSinks, configureLogging, flushLogs, logger, type AppLogLevel } from "../../../packages/logging/src/index";
 import { McpHttpClient, registerConfiguredMcpTools, validateMcpUrl } from "../../../packages/mcp-client/src/index";
-import type { ConversationTurn, ModelContentPart, ModelProvider } from "../../../packages/model-adapters/src/index";
+import type { AgentModelMessage, ConversationTurn, ModelContentPart, ModelProvider } from "../../../packages/model-adapters/src/index";
 import { canRunAgent, canSendImages } from "../../../packages/model-catalog/src/index";
 import { registerOfficeAgentTools } from "../../../packages/office-pack/src/index";
 import {
@@ -17,6 +18,7 @@ import {
   requestPersistentBrowserStorage,
   SettingsRepository,
   ModelProbeRepository,
+  queuedMessageMetadata,
   type MessageKind,
   type McpServerRecord,
   type MessageRecord,
@@ -25,6 +27,7 @@ import {
   type PersistedDirectoryHandle,
   type ProjectRecord,
   type RunRecord,
+  type QueuedMessageKind,
   type ThreadRecord
 } from "../../../packages/persistence/src/index";
 import { loadProjectInstructions } from "../../../packages/project-context/src/index";
@@ -32,7 +35,7 @@ import { importProjectBackup, serializeProjectBackup, type ProjectBackupImportBu
 import { inspectWebContainerSupport, WebContainerRuntimeProvider, WorkspaceMirror, type MirrorEvent } from "../../../packages/runtime-webcontainer/src/index";
 import type { InteractiveRuntimeSession, RuntimeSession, ScriptExecutionRequest, ScriptExecutionResult, ScriptRuntimeProvider, TerminalDimensions } from "../../../packages/runtime-contracts/src/index";
 import { BrowserSkillStore, SkillRegistry, skillFromMarkdown, type SkillDescriptor, type SkillFile } from "../../../packages/skill-core/src/index";
-import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY, BROWSER_AGENT_PACKAGE_DIRECTORY, BROWSER_AGENT_STATE_DIRECTORY, isBrowserAgentInternalPath, OpfsChangeJournal, ProjectFileLogSink, ProjectFileService, resolveDirectoryPermission, type BrowserDirectoryHandle, type ProjectFileChange } from "../../../packages/workspace-contracts/src/index";
+import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY, BROWSER_AGENT_PACKAGE_DIRECTORY, BROWSER_AGENT_STATE_DIRECTORY, isBrowserAgentInternalPath, OpfsChangeJournal, ProjectFileLogSink, ProjectFileService, resolveDirectoryPermission, type BrowserDirectoryHandle } from "../../../packages/workspace-contracts/src/index";
 import { AppUi } from "./ui";
 import { ModelSettingsController } from "./model-settings-controller";
 import { createOpenAICompatibleProfile } from "./model-settings";
@@ -80,9 +83,10 @@ export class BrowserAgentApp {
   private terminalFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private runtimeStartPromise: Promise<void> | undefined;
   private runtimeUnsupportedReported = false;
-  private activeRunOutputPaths: Set<string> | undefined;
   private busy = false;
   private activeRunController: AbortController | undefined;
+  private activeAgentSession: AgentSession | undefined;
+  private activeRunId: string | undefined;
   private allowWritesForCurrentRun = false;
   private loggingEnabled = true;
   private projectLoggingEnabled = false;
@@ -317,7 +321,6 @@ export class BrowserAgentApp {
 
   private async connectProject(project: ProjectRecord, handle: BrowserDirectoryHandle): Promise<void> {
     const service = new ProjectFileService(project.id, handle, new OpfsChangeJournal(), async (change) => {
-      this.trackRunOutput(change);
       if (this.mirror.ready && change.source !== "terminal") await this.mirror.syncHostPath(change.path.includes(" → ") ? change.path.split(" → ").at(-1)! : change.path);
     });
     const createdState = await service.ensureDirectory(BROWSER_AGENT_STATE_DIRECTORY);
@@ -349,7 +352,7 @@ export class BrowserAgentApp {
     this.configureAppLogging();
     this.ui.setConnection(status, label, action);
     this.ui.terminalStart.disabled = true;
-    this.ui.setBusy(false, this.models.hasConfiguration() ? "可继续普通对话，文件工具暂不可用" : "请先配置模型 API");
+    this.ui.setBusy(false, this.models.hasConfiguration() ? "项目未连接，工作模式暂不可用" : "请先配置模型 API");
   }
 
   private async ensureRuntime(interactive: boolean): Promise<void> {
@@ -386,6 +389,9 @@ export class BrowserAgentApp {
       this.ui.runtimeStatus.textContent = "正在启动…";
       if (!this.mirror.ready && this.fileService) await this.mirror.connect(this.fileService);
       if (interactive && !this.interactiveSession) {
+        this.terminal.reset();
+        this.terminalBuffer = "";
+        this.terminal.writeln(`\x1b[90m${t("正在建立新的 jsh 会话…", "Starting a new jsh session…")}\x1b[0m`);
         this.interactiveSession = await this.runtime.startInteractive((data) => this.onTerminalOutput(data), this.dimensions());
         this.ui.terminalStart.textContent = "Runtime 已启动";
         this.ui.terminalStart.disabled = true;
@@ -402,7 +408,7 @@ export class BrowserAgentApp {
     }
   }
 
-  private async send(options: { intent?: string; retryOf?: RunRecord; skipUserMessage?: boolean; queuedMessage?: MessageRecord; resumeCheckpoint?: unknown } = {}): Promise<void> {
+  private async send(options: { intent?: string; retryOf?: RunRecord; resumeRun?: RunRecord; skipUserMessage?: boolean; queuedMessage?: MessageRecord; resumeCheckpoint?: unknown } = {}): Promise<void> {
     const typedIntent = options.queuedMessage?.content.trim() ?? options.intent?.trim() ?? this.ui.intent.value.trim();
     const intent = typedIntent || (this.composerAttachments.length ? "请分析这些图片。" : "");
     if (!intent || !this.activeThread) return;
@@ -430,7 +436,7 @@ export class BrowserAgentApp {
       .map((message) => message.id));
     const needsImages = this.composerAttachments.length > 0 || historicalAttachments.some((attachment) => attachment.messageId && activeMessageIds.has(attachment.messageId));
     if (!await this.ensureSelectedModelCapabilities(needsImages)) return;
-    const previousMessages = this.activeMessages.filter((message) => message.id !== options.queuedMessage?.id && message.metadata?.queueStatus !== "pending" && message.metadata?.queueStatus !== "running");
+    const previousMessages = this.activeMessages.filter((message) => message.id !== options.queuedMessage?.id && !["pending", "running", "delivered", "withdrawn"].includes(String(message.metadata?.queueStatus ?? "")));
     const attachmentsForRun = options.queuedMessage
       ? await this.attachments.listForMessage(options.queuedMessage.id)
       : options.skipUserMessage ? [] : this.composerAttachments;
@@ -448,9 +454,8 @@ export class BrowserAgentApp {
     } : undefined));
     if (options.queuedMessage) {
       const index = this.activeMessages.findIndex((message) => message.id === options.queuedMessage?.id);
-      const runningMessage = { ...options.queuedMessage, metadata: { ...(options.queuedMessage.metadata ?? {}), queueStatus: "running" } };
+      const runningMessage = await this.conversations.transitionQueuedMessage(options.queuedMessage.id, "delivered");
       if (index >= 0) this.activeMessages[index] = runningMessage;
-      await this.conversations.putMessage(runningMessage);
       this.ui.renderMessages(this.activeMessages);
       await this.renderHistoricalAttachments();
     } else if (userMessage) {
@@ -473,9 +478,8 @@ export class BrowserAgentApp {
     const controller = new AbortController();
     this.activeRunController = controller;
     this.allowWritesForCurrentRun = false;
-    this.activeRunOutputPaths = new Set<string>();
     this.ui.setBusy(true, "Agent 正在工作…");
-    const run: RunRecord = {
+    const run: RunRecord = options.resumeRun ?? {
       id: crypto.randomUUID(),
       threadId: this.activeThread.id,
       status: "running",
@@ -491,6 +495,7 @@ export class BrowserAgentApp {
       updatedAt: new Date().toISOString()
     };
     run.changeSetId = run.id;
+    this.activeRunId = run.id;
     await this.conversations.putRun(run);
     try {
       const [provider, agentKernel] = await Promise.all([
@@ -499,7 +504,6 @@ export class BrowserAgentApp {
       ]);
       const previousConversation = await this.prepareConversation(provider, previousMessages, false, controller.signal);
       if (this.mirror.ready) await this.mirror.syncExternalChanges(); else await fileService.refresh();
-      await fileService.beginRun(run.id);
       await fileService.ensureDirectory(browserAgentRunScratchDirectory(run.id));
       const runtime = this.lazyRuntime();
       const onWorkspaceWrite = (path: string): Promise<void> => this.mirror.syncHostPath(path);
@@ -517,64 +521,91 @@ export class BrowserAgentApp {
       registerOfficeAgentTools(tools, { workspace: fileService, onWorkspaceWrite });
       const mcpConnections = await registerConfiguredMcpTools(tools, this.mcpServers, (url) => this.authorizeNetwork(url), controller.signal);
       const projectInstructions = await loadProjectInstructions(fileService, this.activeProject?.instructionsEnabled === true);
-      const resumeCheckpoint = agentKernel.isAgentCheckpoint(options.resumeCheckpoint) ? options.resumeCheckpoint : undefined;
-      const result = await new agentKernel.AgentLoop(provider).run({
-        intent,
-        workspaceId: this.activeProject?.id ?? "project",
-        tools,
-        conversation: previousConversation,
-        ...(attachmentParts.length ? { attachments: attachmentParts } : {}),
-        allowImageToolResults: this.selectedModel()?.capabilities.imageInput === "supported",
-        ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
-        onCheckpoint: async (checkpoint) => {
-          run.checkpoint = checkpoint;
-          run.updatedAt = new Date().toISOString();
-          await this.conversations.putRun(run);
+      const environment = {
+        runtime: {
+          id: runtime.id,
+          available: await runtime.available(),
+          shell: "WebContainer jsh（特殊浏览器 Shell，不是宿主系统 Shell）",
+          workingDirectory: ".",
+          runtimeCommandsUseRelativePaths: true as const,
+          limitations: runtime.limitations?.() ?? ["Runtime 能力信息不可用"]
         },
-        signal: controller.signal,
-        environment: {
-          runtime: {
-            id: runtime.id,
-            available: await runtime.available(),
-            shell: "WebContainer jsh（特殊浏览器 Shell，不是宿主系统 Shell）",
-            workingDirectory: "/workspace",
-            limitations: runtime.limitations?.() ?? ["Runtime 能力信息不可用"]
-          },
-          skills: this.skills.list(),
-          mcpServers: mcpConnections.map((connection) => ({ name: connection.server.name, toolCount: connection.tools.length })),
-          scratchDirectory: browserAgentRunScratchDirectory(run.id),
-          ...(projectInstructions ? { projectInstructions } : {})
-        }
-      }, (event) => this.recordAgentEvent(run, event));
-      run.status = controller.signal.aborted ? "cancelled" : result.task.phase === "COMPLETED" ? "completed" : "failed";
-      this.ui.completeToolRun(run.id, run.status === "completed" ? "completed" : "failed");
-      appLog.info("Agent 回合结束", { threadId: this.activeThread.id, runId: run.id, status: run.status, events: run.events.length });
+        skills: this.skills.list(),
+        mcpServers: mcpConnections.map((connection) => ({ name: connection.server.name, toolCount: connection.tools.length })),
+        scratchDirectory: browserAgentRunScratchDirectory(run.id),
+        ...(projectInstructions ? { projectInstructions } : {})
+      };
+      const session = new AgentSession(run, {
+        conversations: this.conversations,
+        changeSets: fileService,
+        driver: {
+          run: async (request) => {
+            const result = await new agentKernel.AgentLoop(provider).run({
+              intent: request.intent,
+              workspaceId: this.activeProject?.id ?? "project",
+              runId: request.runId,
+              tools,
+              conversation: previousConversation,
+              ...(request.attachments?.length ? { attachments: request.attachments } : {}),
+              allowImageToolResults: this.selectedModel()?.capabilities.imageInput === "supported",
+              ...(request.resumeCheckpoint ? { resumeCheckpoint: request.resumeCheckpoint } : {}),
+              onCheckpoint: request.onCheckpoint,
+              hooks: {
+                prepareNextTurn: async () => this.steeringMessages(await request.takeSteering()),
+                transformContext: async (messages) => {
+                  const delivered = request.resumeCheckpoint?.steering.filter((item) => item.status === "delivered") ?? [];
+                  const existing = new Set(delivered.filter((item) => messages.some((message) => modelMessageContainsSteering(message, item.id))).map((item) => item.id));
+                  return [...messages, ...await this.steeringMessages(delivered.filter((item) => !existing.has(item.id)))];
+                }
+              },
+              signal: request.signal,
+              environment
+            }, request.onEvent);
+            return { status: result.status, reply: result.reply, checkpoint: result.checkpoint, metrics: result.metrics, ...(result.errorKind ? { errorKind: result.errorKind } : {}), ...(result.task.failure ? { error: result.task.failure } : {}) };
+          }
+        },
+        compactCheckpoint: (checkpoint) => this.compactAgentCheckpoint(checkpoint),
+        takeSteering: (runId) => this.takeSteering(runId),
+        consumeSteering: (runId, steeringIds) => this.consumeDeliveredSteering(runId, steeringIds),
+        onEvent: (event) => this.recordAgentEvent(run, event)
+      });
+      this.activeAgentSession = session;
+      const result = options.resumeRun
+        ? await session.resume({ run, ...(agentKernel.isAgentCheckpoint(options.resumeCheckpoint) ? { checkpoint: options.resumeCheckpoint } : {}) })
+        : await session.prompt({ intent, ...(attachmentParts.length ? { attachments: attachmentParts } : {}) });
+      const completedRun = session.run;
+      this.ui.completeToolRun(run.id, completedRun.status === "running" ? "failed" : completedRun.status);
+      if (result.status === "completed" && result.reply) await this.appendMessage("assistant", "assistant", await this.withOutputFileLinks(result.reply, "本次输出文件：", completedRun.outputPaths ?? []));
+      else if (result.error) await this.appendMessage("system", "error", result.error);
+      appLog.info("Agent 回合结束", { threadId: this.activeThread.id, runId: run.id, status: completedRun.status, events: completedRun.events.length });
     } catch (error) {
-      run.status = controller.signal.aborted ? "cancelled" : "failed";
-      appLog.error("Agent 回合失败", { threadId: this.activeThread.id, runId: run.id, events: run.events.length }, error);
+      if (!this.activeAgentSession) {
+        run.status = controller.signal.aborted ? "cancelled" : "failed";
+        run.settledAt = new Date().toISOString();
+        run.updatedAt = run.settledAt;
+        await this.conversations.putRun(run);
+      }
+      appLog.error("Agent 回合失败", { threadId: this.activeThread.id, runId: run.id, events: this.activeAgentSession?.run.events.length ?? run.events.length }, error);
       this.ui.discardAssistantStream();
       this.ui.completeToolRun(run.id, "failed");
       await this.appendMessage("system", "error", controller.signal.aborted ? "运行已由用户停止。" : errorMessage(error));
     } finally {
-      try { await fileService.endRun(run.status === "completed" ? "completed" : run.status === "cancelled" ? "cancelled" : "failed"); }
-      catch (error) { appLog.error("结束 ChangeSet 失败", { runId: run.id }, error); }
-      run.updatedAt = new Date().toISOString();
-      await this.conversations.putRun(run);
       if (options.queuedMessage) {
         const index = this.activeMessages.findIndex((message) => message.id === options.queuedMessage?.id);
         if (index >= 0) {
-          const consumed = { ...this.activeMessages[index]!, metadata: { ...(this.activeMessages[index]!.metadata ?? {}), queueStatus: "consumed" } };
+          const consumed = await this.conversations.transitionQueuedMessage(options.queuedMessage.id, "consumed", run.id);
           this.activeMessages[index] = consumed;
-          await this.conversations.putMessage(consumed);
         }
       }
-      this.activeRunOutputPaths = undefined;
+      const completedRun = this.activeAgentSession?.run;
+      this.activeAgentSession = undefined;
+      this.activeRunId = undefined;
       this.activeRunController = undefined;
       this.busy = false;
       this.ui.setBusy(false, this.fileService ? "模型和项目已就绪" : "项目未连接，文件工具不可用");
       this.updateContextUsage();
       await this.refreshProjectPanels();
-      queueMicrotask(() => { void this.runNextQueuedMessage(); });
+      queueMicrotask(() => { void this.runNextQueuedMessage(completedRun); });
     }
   }
 
@@ -635,7 +666,9 @@ export class BrowserAgentApp {
     const timeout = setTimeout(() => controller.abort(), 120_000);
     try {
       const provider = await this.models.createProvider();
-      const result = await probeModel(provider, controller.signal);
+      const descriptor = this.selectedModel();
+      const imageUnsupported = descriptor?.capabilities.imageInput === "unsupported";
+      const result = await probeModel(provider, controller.signal, { imageInput: !imageUnsupported });
       const record = {
         id: crypto.randomUUID(),
         providerProfileId: this.models.currentProfile.id,
@@ -663,7 +696,7 @@ export class BrowserAgentApp {
       await this.settings.putProviderProfile(this.models.currentProfile);
       await this.refreshModelCatalog(false);
       const label = (value: boolean): string => value ? "通过" : "失败";
-      this.ui.modelProbeStatus.textContent = `文本 ${label(result.text)} · 流式 ${label(result.streaming)} · 工具 ${label(result.toolCalling)} · 图片 ${label(result.imageInput)}`;
+      this.ui.modelProbeStatus.textContent = `文本 ${label(result.text)} · 流式 ${label(result.streaming)} · 工具 ${label(result.toolCalling)} · 图片 ${imageUnsupported ? "不支持" : label(result.imageInput)}`;
       if (!result.toolCalling) this.ui.toast("Quick Test 未通过工具调用测试；已保留原有能力设置，未自动降级。");
     } catch (error) {
       this.ui.modelProbeStatus.textContent = controller.signal.aborted ? "Quick Test 超时。" : `Quick Test 失败：${errorMessage(error)}`;
@@ -747,42 +780,47 @@ export class BrowserAgentApp {
   }
 
   private async recordAgentEvent(run: RunRecord, event: AgentEvent): Promise<void> {
-    if (event.kind === "phase") return;
-    if (event.kind === "assistant-delta") { this.ui.appendAssistantDelta(event.content); return; }
-    if (event.kind === "assistant") {
-      const heading = event.metadata?.failure === true ? "失败前产生的文件（可能不完整）：" : "本次输出文件：";
-      const content = event.metadata?.final === true ? await this.withOutputFileLinks(event.content, heading) : event.content;
-      await this.appendMessage("assistant", "assistant", content);
+    if (event.kind === "agent_start") { this.ui.setBusy(true, "Agent 正在工作…"); return; }
+    if (event.kind === "turn_start") { this.ui.setBusy(true, t(`Agent 正在执行第 ${event.turn} 轮…`)); return; }
+    if (event.kind === "message_start") return;
+    if (event.kind === "message_update") {
+      if (event.updateKind === "text_delta") this.ui.appendAssistantDelta(event.content);
+      else if (event.updateKind === "phase" || event.updateKind === "compaction_progress") this.ui.setBusy(true, event.content);
       return;
     }
-    const callId = typeof event.metadata?.callId === "string" ? event.metadata.callId : undefined;
-    const isToolStep = Boolean(event.toolName && callId);
-    if (event.kind === "error" && !isToolStep) this.ui.discardAssistantStream();
+    if (event.kind === "message_end") return;
+    if (event.kind === "tool_execution_update") { this.ui.setBusy(true, `${event.toolName}：${event.content}`); return; }
+    if (event.kind === "turn_end") { this.ui.setBusy(true, event.action === "pause" ? "Agent 正在暂停…" : "Agent 正在准备下一轮…"); return; }
+    if (event.kind === "agent_end") {
+      this.ui.discardAssistantStream();
+      return;
+    }
+    if (event.kind === "agent_settled") return;
+    const callId = event.callId;
+    const isStart = event.kind === "tool_execution_start";
     let networkHost: string | undefined;
-    if (event.kind === "tool-start" && event.toolName === "network.fetch" && typeof event.metadata?.arguments === "object" && event.metadata.arguments) {
-      const url = (event.metadata.arguments as Record<string, unknown>).url;
+    if (isStart && event.toolName === "network.fetch") {
+      const url = event.arguments.url;
       if (typeof url === "string") try { networkHost = new URL(url).hostname; } catch { /* 无效 URL 会由工具本身报告。 */ }
     }
-    if (event.kind === "tool-result" && event.toolName === "network.fetch") {
+    if (!isStart && event.toolName === "network.fetch") {
       try {
         const finalUrl = (JSON.parse(event.content) as { finalUrl?: unknown }).finalUrl;
         if (typeof finalUrl === "string") networkHost = new URL(finalUrl).hostname;
       } catch { /* 工具失败或截断结果不会影响运行记录。 */ }
     }
-    run.events.push({
-      at: new Date().toISOString(),
-      kind: event.kind === "error" ? "error" : "tool",
-      content: event.content,
-      eventKind: event.kind === "tool-start" || event.kind === "tool-result" ? event.kind : "error",
-      ...(event.toolName ? { toolName: event.toolName } : {}),
-      ...(networkHost ? { networkHost } : {})
-    });
-    const kind: MessageKind = isToolStep ? "tool" : event.kind === "error" ? "error" : "tool";
-    if (event.kind === "error") appLog.error("Agent 工具事件失败", { runId: run.id, toolName: event.toolName, eventKind: event.kind });
+    const isError = !isStart && event.isError;
+    if (isError) appLog.error("Agent 工具事件失败", { runId: run.id, toolName: event.toolName, eventKind: event.kind, errorOrigin: event.errorOrigin, errorFingerprint: event.errorFingerprint });
     else appLog.info("Agent 工具事件", { runId: run.id, toolName: event.toolName, eventKind: event.kind });
-    const metadata: Record<string, unknown> = { ...(event.metadata ?? {}), runId: run.id, eventKind: event.kind };
-    if (event.toolName) metadata.toolName = event.toolName;
-    await this.appendMessage("system", kind, event.content, metadata);
+    const metadata: Record<string, unknown> = {
+      runId: run.id,
+      callId,
+      eventKind: isStart ? "tool-start" : isError ? "error" : "tool-result",
+      toolName: event.toolName,
+      ...(isStart ? { arguments: event.arguments } : { isError, errorOrigin: event.errorOrigin, errorFingerprint: event.errorFingerprint, terminate: event.terminate }),
+      ...(networkHost ? { networkHost } : {})
+    };
+    await this.appendMessage("system", "tool", isStart ? `${event.toolName} ${JSON.stringify(event.arguments)}` : event.content, metadata);
   }
 
   private lazyRuntime(): ScriptRuntimeProvider {
@@ -797,28 +835,11 @@ export class BrowserAgentApp {
     };
   }
 
-  private trackRunOutput(change: ProjectFileChange): void {
-    const paths = this.activeRunOutputPaths;
-    if (!paths || change.source === "external" || isBrowserAgentInternalPath(change.path)) return;
-    const remove = (path: string): void => {
-      for (const current of paths) if (current === path || current.startsWith(`${path}/`)) paths.delete(current);
-    };
-    if (change.type === "move") {
-      const [from, to] = change.path.split(" → ");
-      if (from) remove(from);
-      if (to) paths.add(to);
-      return;
-    }
-    if (change.type === "delete") { remove(change.path); return; }
-    paths.add(change.path);
-  }
-
-  private async withOutputFileLinks(content: string, heading: string): Promise<string> {
+  private async withOutputFileLinks(content: string, heading: string, outputPaths: readonly string[]): Promise<string> {
     const service = this.fileService;
-    const candidates = this.activeRunOutputPaths;
-    if (!service || !candidates?.size) return content;
+    if (!service || !outputPaths.length) return content;
     const files: string[] = [];
-    for (const path of candidates) {
+    for (const path of outputPaths) {
       try { await service.getFile(path); files.push(path); } catch { /* 目录或本回合已删除的路径不进入最终链接。 */ }
     }
     return appendWorkspaceFileLinks(content, files, heading);
@@ -1071,9 +1092,12 @@ export class BrowserAgentApp {
     const thread = this.activeThread;
     if (!thread) return;
     const queuedAttachments = [...this.composerAttachments];
+    const queueKind: QueuedMessageKind = this.ui.composerSendMode.value === "follow-up" ? "follow-up" : "steering";
     const message = await this.appendMessage("user", "user", intent, {
+      queueKind,
       queueStatus: "pending",
       queuedAt: new Date().toISOString(),
+      ...(this.activeRunId ? { runId: this.activeRunId } : {}),
       ...(queuedAttachments.length ? {
         attachments: queuedAttachments.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size }))
       } : {})
@@ -1089,7 +1113,7 @@ export class BrowserAgentApp {
     this.ui.intent.value = "";
     this.ui.resizeComposer();
     await this.clearComposerAttachments(false);
-    this.ui.toast("消息已排队；可在消息旁撤回。");
+    this.ui.toast(queueKind === "steering" ? "消息将在当前完整工具批次后引导本次任务。" : "消息将在当前任务成功完成后执行。 ");
   }
 
   private async withdrawQueuedMessage(messageId: string): Promise<void> {
@@ -1104,18 +1128,93 @@ export class BrowserAgentApp {
       if (preview) URL.revokeObjectURL(preview);
       this.historyAttachmentPreviewUrls.delete(attachment.id);
     }
-    await this.conversations.deleteMessage(message.id);
-    this.activeMessages = this.activeMessages.filter((item) => item.id !== message.id);
+    const withdrawn = await this.conversations.transitionQueuedMessage(message.id, "withdrawn");
+    this.activeMessages = this.activeMessages.map((item) => item.id === message.id ? withdrawn : item);
     this.ui.renderMessages(this.activeMessages);
     await this.renderHistoricalAttachments();
     this.ui.toast("已撤回排队消息。");
   }
 
-  private async runNextQueuedMessage(): Promise<void> {
-    if (this.busy || !this.activeThread || !this.fileService) return;
-    const message = this.activeMessages.find((item) => item.role === "user" && item.metadata?.queueStatus === "pending");
+  private async runNextQueuedMessage(previousRun?: RunRecord, runtimeDeterministicFailure = false): Promise<void> {
+    if (this.busy || !this.activeThread || !this.fileService || !previousRun || !shouldAutoStartFollowUp(previousRun, runtimeDeterministicFailure)) return;
+    const message = this.activeMessages.find((item) => {
+      const metadata = queuedMessageMetadata(item);
+      return item.role === "user" && metadata?.queueKind === "follow-up" && metadata.queueStatus === "pending" && metadata.runId === previousRun.id;
+    });
     if (!message) return;
     await this.send({ queuedMessage: message, skipUserMessage: true });
+  }
+
+  private async takeSteering(runId: string): Promise<SteeringRecord[]> {
+    if (!this.activeThread) return [];
+    const pending = (await this.conversations.queuedMessages(this.activeThread.id, "steering")).filter((message) => queuedMessageMetadata(message)?.runId === runId);
+    const delivered: SteeringRecord[] = [];
+    for (const message of pending) {
+      const updated = await this.conversations.transitionQueuedMessage(message.id, "delivered", runId);
+      const index = this.activeMessages.findIndex((item) => item.id === message.id);
+      if (index >= 0) this.activeMessages[index] = updated;
+      delivered.push({ id: message.id, content: message.content, status: "delivered", attachments: await this.attachments.listForMessage(message.id) });
+    }
+    if (delivered.length) this.ui.renderMessages(this.activeMessages);
+    return delivered;
+  }
+
+  private async steeringMessages(records: readonly SteeringRecord[]): Promise<AgentModelMessage[]> {
+    const messages: AgentModelMessage[] = [];
+    const supportsImages = this.selectedModel()?.capabilities.imageInput === "supported";
+    for (const record of records) {
+      const attachments: AttachmentRecord[] = [];
+      for (const value of record.attachments ?? []) {
+        if (!value || typeof value !== "object" || typeof (value as { id?: unknown }).id !== "string") continue;
+        const stored = await this.attachments.get((value as { id: string }).id);
+        if (stored) attachments.push(stored);
+      }
+      const text = `${steeringMessage(record)}${attachments.length && !supportsImages ? `\n[附件未发送：当前模型不支持图片输入；${attachments.map((item) => item.name).join("、")}]` : ""}`;
+      if (!supportsImages || !attachments.length) { messages.push({ role: "user", content: text }); continue; }
+      const parts: ModelContentPart[] = [{ type: "text", text }];
+      for (const attachment of attachments) parts.push({ type: "image", mimeType: attachment.mimeType, data: await blobToBase64(attachment.blob), attachmentId: attachment.id });
+      messages.push({ role: "user", content: parts });
+    }
+    return messages;
+  }
+
+  private async consumeDeliveredSteering(runId: string, steeringIds: readonly string[]): Promise<void> {
+    const delivered = this.activeMessages.filter((message) => {
+      const metadata = queuedMessageMetadata(message);
+      return metadata?.queueKind === "steering" && metadata.queueStatus === "delivered" && metadata.runId === runId && steeringIds.includes(message.id);
+    });
+    for (const message of delivered) {
+      const consumed = await this.conversations.transitionQueuedMessage(message.id, "consumed", runId);
+      const index = this.activeMessages.findIndex((item) => item.id === message.id);
+      if (index >= 0) this.activeMessages[index] = consumed;
+    }
+    if (delivered.length) {
+      this.ui.renderMessages(this.activeMessages);
+      await this.renderHistoricalAttachments();
+    }
+  }
+
+  private async compactAgentCheckpoint(checkpoint: AgentCheckpointV2): Promise<AgentCheckpointV2> {
+    const summary = formatAgentTaskCompactionState({
+      goal: this.activeAgentSession?.run.intent ?? "继续当前任务",
+      completedWork: checkpoint.evidence.map((item) => `${item.toolName}（callId=${item.callId}）`),
+      changedFiles: checkpoint.accumulatedFiles,
+      completedToolCallIds: checkpoint.completedToolCallIds,
+      runtimeErrors: checkpoint.runtimeErrors.map((item) => `${item.toolName ?? "Runtime"}：${item.message}`),
+      steering: checkpoint.steering.filter((item) => item.status !== "withdrawn").map((item) => item.content),
+      remainingWork: checkpoint.pendingToolCalls.map((call) => `${call.name}（callId=${call.id}）`),
+      nextStep: checkpoint.pendingToolCalls.length ? "继续执行尚未完成的工具批次。" : "根据目标和已有证据继续下一模型回合。"
+    });
+    const firstSystem = checkpoint.messages[0]?.role === "system" ? checkpoint.messages[0] : undefined;
+    const candidates = firstSystem ? checkpoint.messages.slice(1) : checkpoint.messages;
+    const selected = selectCompleteToolRounds(candidates, 8_000);
+    return {
+      ...checkpoint,
+      stage: "compacted",
+      messages: [...(firstSystem ? [firstSystem] : []), { role: "system", content: `【任务内压缩摘要】\n${summary}` }, ...selected.retainedMessages],
+      compactionSummary: summary,
+      updatedAt: new Date().toISOString()
+    };
   }
 
   private async removeComposerAttachment(id: string): Promise<void> {
@@ -1269,6 +1368,7 @@ export class BrowserAgentApp {
 
   private stopActiveRun(): void {
     if (!this.activeRunController || this.activeRunController.signal.aborted) return;
+    this.activeAgentSession?.abort(new DOMException("用户停止了运行。", "AbortError"));
     this.activeRunController.abort(new DOMException("用户停止了运行。", "AbortError"));
     this.interactiveSession?.kill();
     this.ui.stopRun.disabled = true;
@@ -1407,11 +1507,11 @@ export class BrowserAgentApp {
         status: run.status,
         ...(run.model ? { model: run.model } : {}),
         durationMs: Math.max(0, Date.parse(run.updatedAt) - Date.parse(run.createdAt)),
-        toolCount: run.events.filter((event) => event.eventKind === "tool-start").length || Math.ceil(run.events.filter((event) => event.kind === "tool").length / 2),
+        toolCount: run.metrics?.toolCalls ?? (run.events.filter((event) => event.eventKind === "tool-start").length || Math.ceil(run.events.filter((event) => event.kind === "tool").length / 2)),
         networkHosts: [...new Set(run.events.flatMap((event) => event.networkHost ? [event.networkHost] : []))],
-        changedFiles: [...new Set(changeSet?.changes.flatMap((change) => [change.path, ...(change.targetPath ? [change.targetPath] : [])]) ?? [])],
+        changedFiles: [...new Set([...(run.outputPaths ?? []), ...(changeSet?.changes.flatMap((change) => [change.path, ...(change.targetPath ? [change.targetPath] : [])]) ?? [])])].filter((path) => !isBrowserAgentInternalPath(path)),
         createdAt: run.createdAt,
-        canResume: (run.status === "interrupted" || run.status === "failed") && Boolean(run.checkpoint),
+        canResume: (run.status === "paused" || run.status === "interrupted" || run.status === "failed") && Boolean(run.checkpoint),
         ...(error ? { error } : {})
       };
     }), {
@@ -1498,7 +1598,7 @@ export class BrowserAgentApp {
       this.ui.toast("该运行的检查点无效，不能安全继续。");
       return;
     }
-    await this.send({ intent: run.intent, retryOf: run, skipUserMessage: true, resumeCheckpoint: run.checkpoint });
+    await this.send({ intent: run.intent, resumeRun: run, skipUserMessage: true, resumeCheckpoint: run.checkpoint });
   }
 
   private renderSkillManager(): void {
@@ -1804,6 +1904,14 @@ function decodeTextPreview(bytes: Uint8Array): string | undefined {
   if (bytes.byteLength > 1_000_000 || bytes.includes(0)) return undefined;
   try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
   catch { return undefined; }
+}
+function steeringMessage(item: SteeringRecord): string {
+  return `[用户 Steering：${item.id}]\n${item.content}`;
+}
+function modelMessageContainsSteering(message: AgentModelMessage, steeringId: string): boolean {
+  const marker = `[用户 Steering：${steeringId}]`;
+  if (typeof message.content === "string") return message.content.includes(marker);
+  return message.content.some((part) => part.type === "text" && part.text.includes(marker));
 }
 function unifiedTextDiff(path: string, before: string, after: string): string {
   const oldLines = before.split(/\r?\n/);

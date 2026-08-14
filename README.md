@@ -4,7 +4,7 @@
 
 ### A private, browser-native project agent
 
-Work with real local folders, run Node.js tools in a WebContainer, and create Office files—without installing a desktop agent or uploading your entire workspace.
+Work with real local folders, run Bash, Node.js, and npm tools in a first-party browser runtime, and create Office files—without a container key, desktop agent, or whole-workspace upload.
 
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100-app.pages.dev/)
 [![CI](https://img.shields.io/github/actions/workflow/status/wzp100/browser-agent/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wzp100/browser-agent/actions/workflows/ci.yml)
@@ -31,7 +31,7 @@ The application uses a BYOK model: your API key stays in the current browser ses
 |---|---|---|
 | 🔒 | **Local-first access** | Browser File System Access API limits the app to folders you explicitly select. |
 | 🧠 | **Tool-using agent** | LangGraph orchestrates model calls, typed tools, recovery, and evidence-based completion. |
-| ⚡ | **Browser runtime** | WebContainer provides `jsh`, Node.js, npm, pnpm, and compatible pure-JavaScript packages. |
+| ⚡ | **Browser runtime** | Virtual Bash, persistent VFS, esbuild, and QuickJS/WASM support Node-style commands and pure-JavaScript npm packages. |
 | 📄 | **Office generation** | Create and inspect spreadsheets, documents, presentations, and PDFs in the browser. |
 | 🧰 | **Plugins** | Manage system, user, and project Skills plus network-authorized HTTP MCP servers from the main screen. |
 | 💾 | **Durable sessions** | Projects, conversations, permissions, run records, and dependency snapshots recover locally. |
@@ -47,7 +47,7 @@ flowchart LR
     A --> T["Typed tools"]
     T --> F["Real project files"]
     T --> O["Office engines"]
-    T --> R["WebContainer runtime"]
+    T --> R["Virtual Bash + QuickJS/WASM"]
     A <--> M["Your model provider"]
     W --> D["IndexedDB + OPFS"]
 ```
@@ -59,7 +59,7 @@ apps/web
   └─ agent-kernel
       ├─ command-core
       ├─ workspace-contracts
-      ├─ runtime-webcontainer
+      ├─ runtime-virtual
       ├─ office-pack
       └─ model-adapters
 ```
@@ -77,7 +77,7 @@ Open **<https://browser-agent-wzp100-app.pages.dev/>** in a standalone Chrome or
 5. Review created files, diffs, run records, and diagnostic logs in the app.
 
 > [!IMPORTANT]
-> WebContainer requires cross-origin isolation. Use the standalone site in Chrome or Edge, not an embedded browser view.
+> The runtime does not require WebContainer, a StackBlitz client key, or cross-origin isolation. It needs a modern Chrome or Edge with File System Access, WebAssembly, and Web Workers.
 
 ## Quick start
 
@@ -116,9 +116,9 @@ Provider profiles and model names are stored in IndexedDB. API keys are stored o
 
 ## Runtime boundaries
 
-The integrated shell is WebContainer `jsh`, not Windows PowerShell, CMD, Bash on the host, Docker, or a full virtual machine.
+The integrated shell is a browser-native virtual Bash, not Windows PowerShell, CMD, host Bash, Docker, or a full virtual machine.
 
-It supports Node.js and compatible JavaScript tooling. Native binaries, native Node extensions, Python, Docker, and host executables are outside its runtime boundary. Source files and lockfiles sync with the selected folder; dependency caches and a restricted `node_modules` snapshot stay under `.browser-agent/packages`.
+It supports common file commands, variables, conditionals, pipelines, redirections, JavaScript/TypeScript, `node`, `npm install`, and `npx`. npm archives are integrity-checked and lifecycle scripts never run automatically. esbuild bundles code for an isolated QuickJS/WASM Worker with time, memory, and stack budgets. Native binaries, native Node extensions, Python, Docker, and host executables remain out of scope.
 
 ## Privacy and security
 
@@ -158,7 +158,7 @@ packages/
   agent-kernel/        LangGraph orchestration and evidence gate
   command-core/        Tool registry and authorization
   workspace-contracts/ Safe access to the selected folder
-  runtime-webcontainer Browser-contained Node.js runtime
+  runtime-virtual      Browser-native Bash, npm, bundling, and QuickJS/WASM runtime
   office-pack/         Office tools and engines
   persistence/         IndexedDB and migration layer
 skills/builtin/        Bundled reusable skills
@@ -167,9 +167,7 @@ tests/                 Unit, integration, and browser E2E tests
 
 ## Deployment
 
-The included GitHub Actions workflow verifies and deploys both long-lived branches. Verification and production builds require a StackBlitz WebContainer API client key in `VITE_WEBCONTAINER_API_KEY`; CI reads it from the repository Actions variable `WEBCONTAINER_API_KEY`. The client key is embedded in the browser bundle by design and is not a server secret. Never reuse a model-provider API key for it.
-
-For local production builds, copy [`apps/web/.env.example`](apps/web/.env.example) to `apps/web/.env.local` and set the client key. Development mode can open without it, but Runtime startup will fail with an explicit configuration error until it is present. Production builds deliberately stop instead of emitting a deployment whose Runtime cannot boot.
+The included GitHub Actions workflow verifies and deploys both long-lived branches. The runtime ships entirely in the static frontend and needs no WebContainer/StackBlitz key or remote execution service.
 
 Automatic deployment additionally requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`:
 
@@ -194,7 +192,7 @@ pnpm cloudflare:deploy:preview
 pnpm cloudflare:deploy:production
 ```
 
-The deploy scripts build before uploading and map preview to `develop` and production to `main`. For CI, set the WebContainer client key as the Actions variable `WEBCONTAINER_API_KEY`, create a scoped Cloudflare API token with **Account / Cloudflare Pages / Edit**, save it as the GitHub Actions secret `CLOUDFLARE_API_TOKEN`, and set the account ID as the Actions variable `CLOUDFLARE_ACCOUNT_ID`. The response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
+The deploy scripts build before uploading and map preview to `develop` and production to `main`. For CI, create a scoped Cloudflare API token with **Account / Cloudflare Pages / Edit**, save it as the GitHub Actions secret `CLOUDFLARE_API_TOKEN`, and set the account ID as the Actions variable `CLOUDFLARE_ACCOUNT_ID`. Security response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
 
 ## Documentation
 
@@ -205,4 +203,4 @@ The deploy scripts build before uploading and map preview to `develop` and produ
 
 ## License
 
-Browser Agent source code is available under the [MIT License](LICENSE). Third-party services and dependencies, including the WebContainer API, remain subject to their own licenses and terms.
+Browser Agent source code is available under the [MIT License](LICENSE). Third-party open-source dependencies such as QuickJS and esbuild remain subject to their own licenses.

@@ -4,7 +4,7 @@
 
 ### 隐私优先的浏览器原生项目智能体
 
-直接处理本地真实文件夹，在 WebContainer 中运行 Node.js 工具，并生成 Office 文件——无需安装桌面 Agent，也不会自动上传整个工作区。
+直接处理本地真实文件夹，在自研的浏览器虚拟 Runtime 中运行 Bash、Node.js 与 npm 工具，并生成 Office 文件——无需容器密钥、桌面 Agent，也不会自动上传整个工作区。
 
 [![在线体验](https://img.shields.io/badge/在线体验-Cloudflare_Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://browser-agent-wzp100-app.pages.dev/)
 [![CI](https://img.shields.io/github/actions/workflow/status/wzp100/browser-agent/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wzp100/browser-agent/actions/workflows/ci.yml)
@@ -31,7 +31,7 @@ Browser Agent 是一个在 Chrome 或 Edge 中运行的本地优先 AI 项目工
 |---|---|---|
 | 🔒 | **本地优先** | 通过 File System Access API，只访问用户明确选择的文件夹。 |
 | 🧠 | **工具型智能体** | LangGraph 负责编排模型、类型化工具、错误恢复和完成证据。 |
-| ⚡ | **浏览器 Runtime** | WebContainer 提供 `jsh`、Node.js、npm、pnpm 及兼容的纯 JavaScript 包。 |
+| ⚡ | **浏览器 Runtime** | 虚拟 Bash + 持久化文件系统 + esbuild + QuickJS/WASM，支持 Node.js 命令和纯 JavaScript npm 包。 |
 | 📄 | **Office 生成** | 在浏览器中创建和检查表格、文档、演示文稿及 PDF。 |
 | 🧰 | **插件** | 在主界面统一管理系统、用户、项目 Skills，以及经网络授权的 HTTP MCP Server。 |
 | 💾 | **持久恢复** | 项目、对话、权限、运行记录和依赖快照保存在本地并可恢复。 |
@@ -47,7 +47,7 @@ flowchart LR
     A --> T["类型化工具"]
     T --> F["真实项目文件"]
     T --> O["Office 引擎"]
-    T --> R["WebContainer Runtime"]
+    T --> R["Virtual Bash + QuickJS/WASM"]
     A <--> M["用户的模型供应商"]
     W --> D["IndexedDB + OPFS"]
 ```
@@ -59,7 +59,7 @@ apps/web
   └─ agent-kernel
       ├─ command-core
       ├─ workspace-contracts
-      ├─ runtime-webcontainer
+      ├─ runtime-virtual
       ├─ office-pack
       └─ model-adapters
 ```
@@ -79,7 +79,7 @@ apps/web
 5. 在界面中检查输出文件、Diff、运行记录和诊断日志。
 
 > [!IMPORTANT]
-> WebContainer 依赖跨源隔离。请使用独立 Chrome 或 Edge 页面，不要在应用内嵌浏览器中启动 Runtime。
+> Runtime 不依赖 WebContainer、StackBlitz client key 或跨源隔离；仍需支持 File System Access API、WebAssembly 和 Web Worker 的现代 Chrome 或 Edge。
 
 ## 本地启动
 
@@ -118,9 +118,9 @@ corepack pnpm@11.7.0 --dir apps/web dev --host 127.0.0.1 --open
 
 ## Runtime 边界
 
-集成终端是 WebContainer `jsh`，不是 Windows PowerShell、CMD、宿主 Bash、Docker 或完整虚拟机。
+集成终端是浏览器虚拟 Bash，不是 Windows PowerShell、CMD、宿主 Bash、Docker 或完整虚拟机。
 
-它支持 Node.js 和兼容的 JavaScript 工具。原生二进制、原生 Node 扩展、Python、Docker 和宿主 EXE 不在运行边界内。源码与锁文件会和所选目录同步；依赖缓存及受限的 `node_modules` 快照保存在 `.browser-agent/packages`。
+它支持常用文件命令、变量、条件链、管道、重定向、JavaScript/TypeScript、`node`、`npm install` 和 `npx`。npm 包会校验完整性，生命周期脚本永不自动执行；代码经 esbuild 打包后在独立 Worker 的 QuickJS/WASM 中运行，并受超时、内存和栈预算约束。原生二进制、原生 Node 扩展、Python、Docker 和宿主 EXE 不在运行边界内。
 
 ## 隐私与安全
 
@@ -160,7 +160,7 @@ packages/
   agent-kernel/        LangGraph 编排与完成证据门
   command-core/        工具注册和执行授权
   workspace-contracts/ 真实目录安全访问
-  runtime-webcontainer 浏览器内 Node.js Runtime
+  runtime-virtual      浏览器虚拟 Bash、npm、打包和 QuickJS/WASM Runtime
   office-pack/         Office 工具及引擎
   persistence/         IndexedDB 与迁移层
 skills/builtin/        内置可复用 Skills
@@ -169,9 +169,7 @@ tests/                 单元、集成及浏览器 E2E 测试
 
 ## 部署
 
-仓库内置的 GitHub Actions 工作流会先验证再部署两个长期分支。验证和生产构建必须通过 `VITE_WEBCONTAINER_API_KEY` 配置 StackBlitz WebContainer API client key；CI 从仓库 Actions Variable `WEBCONTAINER_API_KEY` 读取。该 client key 按官方设计会被编译进浏览器产物，不是服务端密钥；绝不能拿模型供应商的 API Key 代替。
-
-本地生产构建时，将 [`apps/web/.env.example`](apps/web/.env.example) 复制为 `apps/web/.env.local` 并填写 client key。开发模式可以在未配置时打开，但 Runtime 会给出明确配置错误；生产构建会主动停止，避免生成 Runtime 必然无法启动的部署产物。
+仓库内置的 GitHub Actions 工作流会先验证再部署两个长期分支。Runtime 完全随前端静态产物发布，不需要 WebContainer/StackBlitz 密钥或远程执行服务。
 
 自动部署还需要配置 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`：
 
@@ -196,7 +194,7 @@ pnpm cloudflare:deploy:preview
 pnpm cloudflare:deploy:production
 ```
 
-部署脚本会先构建，再将预览部署映射到 `develop`、生产部署映射到 `main`。CI 需要将 WebContainer client key 保存为 Actions Variable `WEBCONTAINER_API_KEY`，创建仅含 **Account / Cloudflare Pages / Edit** 权限的 API Token 并保存为 GitHub Actions Secret `CLOUDFLARE_API_TOKEN`，再将账户 ID 保存为 Actions Variable `CLOUDFLARE_ACCOUNT_ID`。响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
+部署脚本会先构建，再将预览部署映射到 `develop`、生产部署映射到 `main`。CI 只需创建含 **Account / Cloudflare Pages / Edit** 权限的 API Token 并保存为 GitHub Actions Secret `CLOUDFLARE_API_TOKEN`，再将账户 ID 保存为 Actions Variable `CLOUDFLARE_ACCOUNT_ID`。安全响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
 
 ## 文档
 
@@ -207,4 +205,4 @@ pnpm cloudflare:deploy:production
 
 ## 许可证
 
-Browser Agent 源码使用 [MIT License](LICENSE)。WebContainer API 等第三方服务和依赖仍受其各自许可证及服务条款约束。
+Browser Agent 源码使用 [MIT License](LICENSE)。QuickJS、esbuild 等第三方开源依赖仍受各自许可证约束。

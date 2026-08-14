@@ -5,7 +5,7 @@ description: 在浏览器主线程检查或创建真实项目中的 DOCX 文档�
 
 ## 环境约束
 
-当前 Shell 是特殊 WebContainer `jsh`，不是宿主系统 Shell。DOCX 引擎运行在浏览器主线程；不要使用 Shell、Python、PowerShell、EXE 或宿主绝对路径处理文档。
+当前 Shell 是浏览器虚拟 Bash，不是宿主系统 Shell。DOCX 引擎运行在浏览器主线程；不要使用 Shell、Python、PowerShell、EXE 或宿主绝对路径处理文档。
 
 ## 工作流
 

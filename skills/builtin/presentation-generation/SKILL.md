@@ -5,7 +5,7 @@ description: 在浏览器主线程检查或创建简洁 PPTX；适用于 PowerPo
 
 ## 环境约束
 
-当前 Shell 是特殊 WebContainer `jsh`，不是宿主系统 Shell。PPTX 引擎运行在浏览器主线程；不要使用 Shell、Python、PowerShell、EXE 或宿主绝对路径处理演示文稿。
+当前 Shell 是浏览器虚拟 Bash，不是宿主系统 Shell。PPTX 引擎运行在浏览器主线程；不要使用 Shell、Python、PowerShell、EXE 或宿主绝对路径处理演示文稿。
 
 ## 工作流
 

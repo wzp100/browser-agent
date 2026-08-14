@@ -1,6 +1,6 @@
 export interface RuntimeSession {
   id: string;
-  /** 面向调用方的项目根工作目录，不暴露 WebContainer 的内部绝对路径。 */
+  /** 面向调用方的项目根工作目录，不暴露实现层内部路径。 */
   workingDirectory: ".";
   /** Runtime 命令必须使用项目根相对路径。 */
   runtimeCommandsUseRelativePaths: true;

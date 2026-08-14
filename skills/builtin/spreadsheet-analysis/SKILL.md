@@ -5,7 +5,7 @@ description: 在浏览器主线程读取、分析、转换或创建真实项目�
 
 ## 环境约束
 
-当前 Shell 是特殊 WebContainer `jsh`，不是 PowerShell、CMD、Linux Bash 或完整操作系统。表格引擎运行在浏览器主线程：不要调用 Shell，不要探测或声称使用 Python、python3、pip、conda，也不要使用宿主绝对路径。
+当前 Shell 是浏览器虚拟 Bash，不是 PowerShell、CMD、Linux Bash 或完整操作系统。表格引擎运行在浏览器主线程：不要调用 Shell，不要探测或声称使用 Python、python3、pip、conda，也不要使用宿主绝对路径。
 
 ## 工作流
 

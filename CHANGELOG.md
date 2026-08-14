@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 - 2026-08-15
+
+自有浏览器虚拟 Runtime 首个稳定版本。
+
+- 以持久化虚拟文件系统和安全解析器实现 Virtual Bash，支持变量、条件链、管道、重定向、glob 与常用文件命令。
+- 使用独立 Worker 中的 QuickJS/WASM 执行 JavaScript/TypeScript，并同时设置解释器截止时间、内存/栈预算和宿主强制取消。
+- 新增 npm Registry 安装器：semver 依赖图、HTTPS、SRI/SHA 校验、安全 tar 解包、下载/文件预算、持久锁文件，且永不执行生命周期脚本。
+- 使用 esbuild-wasm 打包项目源码和已安装的纯 JavaScript npm 包，提供 `node`、`npm install` 与 `npx` 命令。
+- 删除 WebContainer、StackBlitz client key、跨源隔离和工作区镜像依赖；Runtime 可在普通现代 Chromium 页面启动。
+- 真实浏览器端到端覆盖 Bash、JavaScript、npm 安装、依赖执行、错误传播和无限循环取消。
+
 ## 0.1.1 - 2026-08-14
 
 安全修复版本。

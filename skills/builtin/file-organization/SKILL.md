@@ -5,7 +5,7 @@ description: 在真实项目目录中读取、搜索、整理、移动或删除�
 
 ## 环境约束
 
-当前 Shell 是特殊 WebContainer `jsh`，不是 Windows PowerShell、CMD、宿主 Linux Bash 或完整操作系统。文件管理直接使用 `workspace.*` 操作用户授权的真实项目目录；不要用 Shell 文件命令，也不要编造宿主绝对路径。只有确实需要 Node.js、npm 或纯 JavaScript 时才使用 `shell.exec`。
+当前 Shell 是浏览器虚拟 Bash，不是 Windows PowerShell、CMD、宿主 Linux Bash 或完整操作系统。文件管理直接使用 `workspace.*` 操作用户授权的真实项目目录；不要编造宿主绝对路径。只有确实需要 Node.js、npm 或纯 JavaScript 时才使用 `shell.exec`。
 
 ## 工作流
 

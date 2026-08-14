@@ -5,7 +5,7 @@
 - `BrowserAgentApp` 负责浏览器界面的组合与生命周期。
 - `AgentLoop` 使用 LangGraph 编排模型、工具和完成证据校验。
 - `ProjectFileService` 直接操作用户明确授权的项目目录，并在覆盖或删除前记录恢复数据。
-- `WorkspaceMirror` 在真实目录与 WebContainer 之间双向同步；`.browser-agent/packages` 仅保存可重建缓存和依赖快照。
+- `VirtualRuntimeProvider` 通过 `ProjectVirtualFileSystem` 直连真实目录，并以 Virtual Bash、npm 安装器、esbuild 与 QuickJS/WASM Worker 提供受限执行能力。
 - Office 工具按需加载 XLSX、DOCX 和 PPTX 引擎，生成后重新解析验证结构。
 
 ## 数据与密钥边界

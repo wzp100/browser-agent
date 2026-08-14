@@ -2,17 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 
 const MOCK_GATEWAY = "http://127.0.0.1:8790/mock-runtime-gateway";
 
-test("真实 WebContainer 执行 JavaScript、ESM、npm、错误与取消且不泄漏临时脚本", async ({ page }) => {
+test("Virtual Runtime 执行 Bash、JavaScript、npm 包、错误与强制取消", async ({ page }) => {
   const calls: GatewayCall[] = [];
   const consoleErrors: string[] = [];
-  const runtimeNetworkFailures: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   page.on("pageerror", (error) => consoleErrors.push(`${error.name}: ${error.message}`));
-  page.on("requestfailed", (request) => {
-    if (/stackblitz|staticblitz|webcontainer/i.test(request.url())) runtimeNetworkFailures.push(`${request.url()}：${request.failure()?.errorText ?? "unknown"}`);
-  });
   page.on("dialog", (dialog) => dialog.accept());
   await installGatewayRoutes(page, calls);
   await page.addInitScript(() => {
@@ -27,46 +23,32 @@ test("真实 WebContainer 执行 JavaScript、ESM、npm、错误与取消且不�
 
   const response = await page.goto("/");
   expect(response?.status()).toBe(200);
-  const headers = response?.headers() ?? {};
-  expect(headers["cross-origin-opener-policy"]).toBe("same-origin");
-  expect(headers["cross-origin-embedder-policy"]).toBe("credentialless");
-  await expect.poll(() => page.evaluate(() => ({
-    isolated: crossOriginIsolated,
-    sharedArrayBuffer: typeof SharedArrayBuffer
-  }))).toEqual({ isolated: true, sharedArrayBuffer: "function" });
-
   await configureGateway(page);
   await resetRuntimeProject(page);
   await createProject(page);
-  await writeWorkspaceFile(page, "数据 空格.txt", "中文 runtime fixture\n");
-  expect(await workspaceMjsFiles(page)).toEqual([]);
-  await startRuntime(page, runtimeNetworkFailures);
+  await startRuntime(page);
+
+  await runIntent(page, "[RUNTIME:SHELL] 执行基础 Bash 管道和重定向。", "虚拟 Bash 已执行");
+  expect(toolContents(calls, "shell.exec")).toContain("BASH_OK");
 
   await runIntent(page, "[RUNTIME:JS] 执行普通 JavaScript。", "普通 JavaScript 已执行");
   expect(toolContents(calls, "javascript.exec")).toContain("runtime-ok");
 
-  await runIntent(page, "[RUNTIME:ESM] 使用 ESM 相对读取文件。", "ESM 相对读取已执行");
-  expect(toolContents(calls, "javascript.exec")).toContain("中文 runtime fixture");
-
-  await runIntent(page, "[RUNTIME:TEMP] 检查 Runtime 内部临时脚本。", "Runtime 临时目录已检查");
-  expect(toolContents(calls, "shell.exec")).toContain("runtime-temp-files=[]");
-
   await runIntent(page, "[RUNTIME:ERROR] 验证执行错误可返回模型。", "执行错误已被结构化处理");
   expect(toolContents(calls, "javascript.exec")).toContain("expected-runtime-error");
 
-  await runIntent(page, "[RUNTIME:NPM] 安装纯 JavaScript 依赖并保存快照。", "依赖安装已执行", 180_000);
-  await expect.poll(() => workspaceFileSize(page, ".browser-agent/packages/installed/node-modules.snapshot"), { timeout: 60_000 }).toBeGreaterThan(0);
+  await runIntent(page, "[RUNTIME:NPM] 安装纯 JavaScript 依赖。", "依赖安装已执行", 180_000);
+  await expect.poll(() => workspaceFileSize(page, ".browser-agent/virtual-lock.json"), { timeout: 60_000 }).toBeGreaterThan(0);
+  await runIntent(page, "[RUNTIME:PACKAGE] 执行刚安装的依赖。", "已安装依赖执行成功");
+  expect(lastToolContent(calls, "shell.exec")).toContain("PACKAGE_OK=true");
 
   await page.locator("#intent").fill("[RUNTIME:ABORT] 启动长时间 JavaScript 并等待停止。");
   await page.locator("#send").click();
-  await expect(page.locator("#runtime-status")).toContainText("WebContainer 已连接", { timeout: 120_000 });
-  expect(await workspaceMjsFiles(page)).toEqual([]);
+  await expect(page.locator(".tool-step-command").last()).toContainText("while (true)", { timeout: 30_000 });
+  await expect(page.locator(".tool-step-state").last()).toContainText("运行中");
   await page.locator("#stop-run").click();
   await expect(page.locator(".message.error").last()).toContainText("停止", { timeout: 30_000 });
 
-  await expect.poll(() => workspaceMjsFiles(page)).toEqual([]);
-  await runIntent(page, "[RUNTIME:TEMP] 停止后再次检查 Runtime 内部临时脚本。", "Runtime 临时目录已检查");
-  expect(lastToolContent(calls, "shell.exec")).toContain("runtime-temp-files=[]");
   expect(consoleErrors.filter((message) => /TypeMismatchError|EISDIR/i.test(message))).toEqual([]);
   expect(consoleErrors.length).toBeLessThan(20);
 });
@@ -90,27 +72,27 @@ function nextTurn(call: GatewayCall): GatewayTurn {
   if (intent.includes("[RUNTIME:ABORT]")) {
     return tools.length
       ? { text: "长时间脚本已结束。", toolCalls: [] }
-      : tool("runtime-abort", "javascript.exec", { source: "await new Promise(() => {});" });
+      : tool("runtime-abort", "javascript.exec", { source: "while (true) {}", timeoutMs: 60_000 });
   }
   if (intent.includes("[RUNTIME:NPM]")) {
     return tools.length
       ? { text: "依赖安装已执行。", toolCalls: [] }
       : tool("runtime-npm", "shell.exec", { command: "npm install --ignore-scripts --no-save is-number@7.0.0", timeoutMs: 120_000 });
   }
-  if (intent.includes("[RUNTIME:TEMP]")) {
+  if (intent.includes("[RUNTIME:PACKAGE]")) {
     return tools.length
-      ? { text: "Runtime 临时目录已检查。", toolCalls: [] }
-      : tool("runtime-temp-check", "shell.exec", { command: String.raw`node -e "const fs=require('node:fs');const path='.browser-agent/runtime-tmp';const found=[];function walk(dir){if(!fs.existsSync(dir))return;for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const next=dir+'/'+entry.name;if(entry.isDirectory())walk(next);else if(entry.name.endsWith('.mjs'))found.push(next)}}walk(path);console.log('runtime-temp-files='+JSON.stringify(found.sort()))"` });
+      ? { text: "已安装依赖执行成功。", toolCalls: [] }
+      : tool("runtime-package", "shell.exec", { command: `node -e "const isNumber=require('is-number'); console.log('PACKAGE_OK='+isNumber(7))"` });
+  }
+  if (intent.includes("[RUNTIME:SHELL]")) {
+    return tools.length
+      ? { text: "虚拟 Bash 已执行。", toolCalls: [] }
+      : tool("runtime-shell", "shell.exec", { command: "printf 'b\\na\\n' | sort > sorted.txt && grep a sorted.txt && echo BASH_OK" });
   }
   if (intent.includes("[RUNTIME:ERROR]")) {
     if (!tools.length) return tool("runtime-error", "javascript.exec", { source: 'throw new Error("expected-runtime-error");' });
     if (!toolNames.includes("workspace.list")) return tool("runtime-error-evidence", "workspace.list", { path: "/" });
     return { text: "执行错误已被结构化处理。", toolCalls: [] };
-  }
-  if (intent.includes("[RUNTIME:ESM]")) {
-    return tools.length
-      ? { text: "ESM 相对读取已执行。", toolCalls: [] }
-      : tool("runtime-esm", "javascript.exec", { source: 'import { readFile } from "node:fs/promises"; console.log((await readFile("./数据 空格.txt", "utf8")).trim());' });
   }
   return tools.length
     ? { text: "普通 JavaScript 已执行。", toolCalls: [] }
@@ -137,13 +119,9 @@ async function createProject(page: Page): Promise<void> {
   await expect(page.locator("#intent")).toBeEnabled();
 }
 
-async function startRuntime(page: Page, networkFailures: string[]): Promise<void> {
+async function startRuntime(page: Page): Promise<void> {
   await page.locator("#terminal-start").click();
-  await expect.poll(async () => ({
-    status: (await page.locator("#runtime-status").textContent())?.trim(),
-    networkFailures
-  }), { timeout: 60_000, message: "真实 WebContainer 应在 60 秒内完成 boot，且外部引导资源不得被浏览器拦截" })
-    .toEqual({ status: "WebContainer 已连接", networkFailures: [] });
+  await expect(page.locator("#runtime-status")).toContainText("Virtual Runtime 已连接", { timeout: 60_000 });
 }
 
 async function resetRuntimeProject(page: Page): Promise<void> {
@@ -159,35 +137,6 @@ async function runIntent(page: Page, intent: string, finalText: string, timeout 
   await page.locator("#send").click();
   await expect(page.locator(".message.assistant").last()).toContainText(finalText, { timeout });
   await expect(page.locator("#stop-run")).toBeHidden();
-}
-
-async function writeWorkspaceFile(page: Page, name: string, content: string): Promise<void> {
-  await page.evaluate(async ({ filename, value }) => {
-    const root = await navigator.storage.getDirectory();
-    const project = await root.getDirectoryHandle("browser-agent-runtime-e2e", { create: true });
-    const handle = await project.getFileHandle(filename, { create: true });
-    const writer = await handle.createWritable();
-    await writer.write(value);
-    await writer.close();
-  }, { filename: name, value: content });
-}
-
-async function workspaceMjsFiles(page: Page): Promise<string[]> {
-  return page.evaluate(async () => {
-    const root = await navigator.storage.getDirectory();
-    const project = await root.getDirectoryHandle("browser-agent-runtime-e2e", { create: true });
-    const found: string[] = [];
-    const walk = async (directory: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
-      const iterable = directory as FileSystemDirectoryHandle & { entries(): AsyncIterableIterator<[string, FileSystemHandle]> };
-      for await (const [name, handle] of iterable.entries()) {
-        const path = prefix ? `${prefix}/${name}` : name;
-        if (handle.kind === "directory") await walk(handle as FileSystemDirectoryHandle, path);
-        else if (name.endsWith(".mjs")) found.push(path);
-      }
-    };
-    await walk(project, "");
-    return found.sort();
-  });
 }
 
 async function workspaceFileSize(page: Page, path: string): Promise<number> {

@@ -32,10 +32,10 @@ import {
 } from "../../../packages/persistence/src/index";
 import { loadProjectInstructions } from "../../../packages/project-context/src/index";
 import { importProjectBackup, serializeProjectBackup, type ProjectBackupImportBundle } from "../../../packages/project-backup/src/index";
-import { inspectWebContainerSupport, WebContainerRuntimeProvider, WorkspaceMirror, type MirrorEvent } from "../../../packages/runtime-webcontainer/src/index";
 import type { InteractiveRuntimeSession, RuntimeSession, ScriptExecutionRequest, ScriptExecutionResult, ScriptRuntimeProvider, TerminalDimensions } from "../../../packages/runtime-contracts/src/index";
+import { ProjectVirtualFileSystem, VirtualRuntimeProvider } from "../../../packages/runtime-virtual/src/index";
 import { BrowserSkillStore, SkillRegistry, skillFromMarkdown, type SkillDescriptor, type SkillFile } from "../../../packages/skill-core/src/index";
-import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY, BROWSER_AGENT_PACKAGE_DIRECTORY, BROWSER_AGENT_STATE_DIRECTORY, isBrowserAgentInternalPath, OpfsChangeJournal, ProjectFileLogSink, ProjectFileService, resolveDirectoryPermission, type BrowserDirectoryHandle } from "../../../packages/workspace-contracts/src/index";
+import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGENT_PACKAGE_DIRECTORY, BROWSER_AGENT_STATE_DIRECTORY, isBrowserAgentInternalPath, OpfsChangeJournal, ProjectFileLogSink, ProjectFileService, resolveDirectoryPermission, type BrowserDirectoryHandle } from "../../../packages/workspace-contracts/src/index";
 import { AppUi } from "./ui";
 import { ModelSettingsController } from "./model-settings-controller";
 import { createOpenAICompatibleProfile } from "./model-settings";
@@ -59,8 +59,7 @@ export class BrowserAgentApp {
   private readonly models = new ModelSettingsController(this.ui, this.settings);
   private readonly logStore = new BrowserLogStore(this.database);
   private readonly skills = new SkillRegistry(new BrowserSkillStore());
-  private readonly mirror = new WorkspaceMirror((event) => this.onMirrorEvent(event));
-  private readonly runtime = new WebContainerRuntimeProvider(this.mirror);
+  private runtime: VirtualRuntimeProvider | undefined;
   private readonly terminal = new Terminal({
     convertEol: true,
     cursorBlink: true,
@@ -82,7 +81,6 @@ export class BrowserAgentApp {
   private terminalBuffer = "";
   private terminalFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private runtimeStartPromise: Promise<void> | undefined;
-  private runtimeUnsupportedReported = false;
   private busy = false;
   private activeRunController: AbortController | undefined;
   private activeAgentSession: AgentSession | undefined;
@@ -94,15 +92,12 @@ export class BrowserAgentApp {
   private mcpServers: McpServerRecord[] = [];
 
   async boot(): Promise<void> {
-    const runtimeSupport = inspectWebContainerSupport();
-    appLog.info("开始启动 Browser Agent", { url: location.href, userAgent: navigator.userAgent, runtimeSupport });
+    appLog.info("开始启动 Browser Agent", { url: location.href, userAgent: navigator.userAgent, runtime: "QuickJS/WASM" });
     this.terminal.loadAddon(this.fit);
     this.terminal.open(this.ui.terminalHost);
     this.fit.fit();
-    this.terminal.writeln("\x1b[90mBrowser Agent WebContainer Terminal\x1b[0m");
-    this.terminal.writeln(runtimeSupport.supported
-      ? `\x1b[90m${t("选择项目后点击“启动 Runtime”。", "Select a project, then choose Start Runtime.")}\x1b[0m`
-      : `\x1b[33m${t("当前内嵌页面不支持 WebContainer；请使用启动脚本打开的独立 Chrome 或 Edge 页面。", "This embedded page cannot run WebContainer. Open the app in standalone Chrome or Edge using the startup script.")}\x1b[0m`);
+    this.terminal.writeln("\x1b[90mBrowser Agent Virtual Runtime · QuickJS/WASM\x1b[0m");
+    this.terminal.writeln(`\x1b[90m${t("选择项目后点击“启动 Runtime”。", "Select a project, then choose Start Runtime.")}\x1b[0m`);
     new ResizeObserver(() => { this.fit.fit(); this.interactiveSession?.resize(this.dimensions()); }).observe(this.ui.terminalHost);
     this.terminal.onData((data) => { if (this.interactiveSession) void this.interactiveSession.write(data); });
     this.bindEvents();
@@ -186,8 +181,8 @@ export class BrowserAgentApp {
     this.ui.refreshLogs.addEventListener("click", () => void this.refreshLogs());
     this.ui.exportLogs.addEventListener("click", () => void this.exportLogs());
     this.ui.clearLogs.addEventListener("click", () => void this.clearLogs());
-    window.addEventListener("focus", () => { if (this.mirror.ready) void this.mirror.syncExternalChanges(); });
-    document.addEventListener("visibilitychange", () => { if (!document.hidden && this.mirror.ready) void this.mirror.syncExternalChanges(); });
+    window.addEventListener("focus", () => { if (this.fileService) void this.fileService.refresh(); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && this.fileService) void this.fileService.refresh(); });
   }
 
   private async newProject(): Promise<void> {
@@ -229,7 +224,7 @@ export class BrowserAgentApp {
     await this.flushTerminalTranscript();
     this.interactiveSession?.kill();
     this.interactiveSession = undefined;
-    if (this.activeThread?.projectId !== (await this.conversations.getThread(threadId))?.projectId) await this.mirror.disconnect();
+    if (this.activeThread?.projectId !== (await this.conversations.getThread(threadId))?.projectId) this.runtime = undefined;
     this.fileService = undefined;
     this.skills.clearSource("project");
     this.renderSkillManager();
@@ -320,26 +315,25 @@ export class BrowserAgentApp {
   }
 
   private async connectProject(project: ProjectRecord, handle: BrowserDirectoryHandle): Promise<void> {
-    const service = new ProjectFileService(project.id, handle, new OpfsChangeJournal(), async (change) => {
-      if (this.mirror.ready && change.source !== "terminal") await this.mirror.syncHostPath(change.path.includes(" → ") ? change.path.split(" → ").at(-1)! : change.path);
-    });
+    const service = new ProjectFileService(project.id, handle, new OpfsChangeJournal());
     const createdState = await service.ensureDirectory(BROWSER_AGENT_STATE_DIRECTORY);
     const createdPackages = await service.ensureDirectory(BROWSER_AGENT_PACKAGE_DIRECTORY);
-    const createdInstalledPackages = await service.ensureDirectory(BROWSER_AGENT_INSTALLED_PACKAGE_DIRECTORY);
     const interruptedChangeSets = await service.interruptActiveChangeSets();
     const entries = await service.captureBaseline();
     const projectFileCount = entries.filter((entry) => entry.kind === "file" && !isBrowserAgentInternalPath(entry.path)).length;
-    appLog.info("真实项目文件服务已连接", { projectId: project.id, projectName: project.name, files: projectFileCount, interruptedChangeSets, browserAgentDirectoriesCreated: createdState || createdPackages || createdInstalledPackages });
+    appLog.info("真实项目文件服务已连接", { projectId: project.id, projectName: project.name, files: projectFileCount, interruptedChangeSets, browserAgentDirectoriesCreated: createdState || createdPackages });
     this.fileService = service;
+    this.interactiveSession?.kill();
+    this.interactiveSession = undefined;
+    this.runtime = new VirtualRuntimeProvider(new ProjectVirtualFileSystem(service));
     await this.loadProjectSkills(service);
     this.configureAppLogging();
     const updated: ProjectRecord = { ...project, permissionHint: "granted", legacyRelinkRequired: false, lastOpenedAt: new Date().toISOString() };
     await this.projects.put(updated);
     this.activeProject = updated;
     this.ui.setConnection("connected", `已连接 · ${projectFileCount} 个文件`);
-    const runtimeSupport = inspectWebContainerSupport();
-    this.ui.terminalStart.disabled = !runtimeSupport.supported;
-    if (!runtimeSupport.supported) this.ui.runtimeStatus.textContent = "需在独立 Chrome / Edge 中打开";
+    this.ui.terminalStart.disabled = false;
+    this.ui.runtimeStatus.textContent = "可启动 · 无需容器密钥";
     this.ui.setBusy(false, this.models.hasConfiguration() ? "模型和项目已就绪" : "请在设置中配置模型 API");
     await this.refreshProjectControls();
     await this.refreshProjectPanels();
@@ -363,12 +357,7 @@ export class BrowserAgentApp {
       throw new Error(message);
     }
     if (interactive) this.setTerminalCollapsed(false);
-    const runtimeSupport = inspectWebContainerSupport();
-    if (!runtimeSupport.supported) {
-      const message = runtimeSupport.message ?? "当前浏览器上下文不支持 WebContainer。";
-      this.reportUnsupportedRuntime(message);
-      throw new Error(message);
-    }
+    if (!this.runtime || !await this.runtime.available()) throw new Error("当前浏览器缺少 WebAssembly 或 Web Worker，无法启动虚拟 Runtime。");
     if (this.runtimeStartPromise) {
       appLog.debug("等待正在进行的 Runtime 启动", { interactive });
       await this.runtimeStartPromise;
@@ -377,7 +366,7 @@ export class BrowserAgentApp {
     this.ui.terminalStart.disabled = true;
     this.runtimeStartPromise = this.startRuntime(interactive).finally(() => {
       this.runtimeStartPromise = undefined;
-      if (!this.interactiveSession) this.ui.terminalStart.disabled = !this.fileService || !inspectWebContainerSupport().supported;
+      if (!this.interactiveSession) this.ui.terminalStart.disabled = !this.fileService;
     });
     await this.runtimeStartPromise;
   }
@@ -385,19 +374,19 @@ export class BrowserAgentApp {
   private async startRuntime(interactive: boolean): Promise<void> {
     const projectId = this.fileService?.projectId;
     try {
-      appLog.info("请求启动 Runtime", { projectId, interactive, mirrorReady: this.mirror.ready });
+      appLog.info("请求启动 Runtime", { projectId, interactive, engine: "QuickJS/WASM" });
       this.ui.runtimeStatus.textContent = "正在启动…";
-      if (!this.mirror.ready && this.fileService) await this.mirror.connect(this.fileService);
+      const runtime = this.requireRuntime();
       if (interactive && !this.interactiveSession) {
         this.terminal.reset();
         this.terminalBuffer = "";
-        this.terminal.writeln(`\x1b[90m${t("正在建立新的 jsh 会话…", "Starting a new jsh session…")}\x1b[0m`);
-        this.interactiveSession = await this.runtime.startInteractive((data) => this.onTerminalOutput(data), this.dimensions());
+        this.terminal.writeln(`\x1b[90m${t("正在建立新的虚拟 Bash 会话…", "Starting a new virtual Bash session…")}\x1b[0m`);
+        this.interactiveSession = await runtime.startInteractive((data) => this.onTerminalOutput(data), this.dimensions());
         this.ui.terminalStart.textContent = "Runtime 已启动";
         this.ui.terminalStart.disabled = true;
         this.terminal.focus();
       }
-      this.ui.runtimeStatus.textContent = "WebContainer 已连接";
+      this.ui.runtimeStatus.textContent = "Virtual Runtime 已连接";
       appLog.info("Runtime 启动完成", { projectId, interactive, shellStarted: Boolean(this.interactiveSession) });
     } catch (error) {
       this.ui.runtimeStatus.textContent = "启动失败";
@@ -503,10 +492,10 @@ export class BrowserAgentApp {
         import("../../../packages/agent-kernel/src/index")
       ]);
       const previousConversation = await this.prepareConversation(provider, previousMessages, false, controller.signal);
-      if (this.mirror.ready) await this.mirror.syncExternalChanges(); else await fileService.refresh();
+      await fileService.refresh();
       await fileService.ensureDirectory(browserAgentRunScratchDirectory(run.id));
       const runtime = this.lazyRuntime();
-      const onWorkspaceWrite = (path: string): Promise<void> => this.mirror.syncHostPath(path);
+      const onWorkspaceWrite = async (_path: string): Promise<void> => undefined;
       const tools = agentKernel.createCoreToolRegistry({
         workspace: fileService,
         runtime,
@@ -525,7 +514,7 @@ export class BrowserAgentApp {
         runtime: {
           id: runtime.id,
           available: await runtime.available(),
-          shell: "WebContainer jsh（特殊浏览器 Shell，不是宿主系统 Shell）",
+          shell: "浏览器虚拟 Bash（持久化 VFS + QuickJS/WASM，不是宿主系统 Shell）",
           workingDirectory: ".",
           runtimeCommandsUseRelativePaths: true as const,
           limitations: runtime.limitations?.() ?? ["Runtime 能力信息不可用"]
@@ -825,14 +814,19 @@ export class BrowserAgentApp {
 
   private lazyRuntime(): ScriptRuntimeProvider {
     return {
-      id: this.runtime.id,
-      available: () => this.runtime.available(),
-      start: async (): Promise<RuntimeSession> => { await this.ensureRuntime(false); return this.runtime.start(); },
-      execute: (session: RuntimeSession, request: ScriptExecutionRequest): Promise<ScriptExecutionResult> => this.runtime.execute(session, request),
-      startInteractive: (onOutput: (data: string) => void, dimensions: TerminalDimensions) => this.runtime.startInteractive(onOutput, dimensions),
-      terminate: (session: RuntimeSession) => this.runtime.terminate(session),
-      limitations: () => this.runtime.limitations()
+      id: "browser-agent-virtual",
+      available: async () => this.runtime?.available() ?? false,
+      start: async (): Promise<RuntimeSession> => { await this.ensureRuntime(false); return this.requireRuntime().start(); },
+      execute: (session: RuntimeSession, request: ScriptExecutionRequest): Promise<ScriptExecutionResult> => this.requireRuntime().execute(session, request),
+      startInteractive: (onOutput: (data: string) => void, dimensions: TerminalDimensions) => this.requireRuntime().startInteractive(onOutput, dimensions),
+      terminate: (session: RuntimeSession) => this.requireRuntime().terminate(session),
+      limitations: () => this.runtime?.limitations() ?? ["Runtime 尚未连接项目"]
     };
+  }
+
+  private requireRuntime(): VirtualRuntimeProvider {
+    if (!this.runtime) throw new Error("Runtime 尚未连接项目");
+    return this.runtime;
   }
 
   private async withOutputFileLinks(content: string, heading: string, outputPaths: readonly string[]): Promise<string> {
@@ -966,7 +960,9 @@ export class BrowserAgentApp {
     if (!thread || !window.confirm(`确定删除对话“${thread.title}”吗？\n\n其中的消息和运行记录将永久删除。`)) return;
     await this.conversations.deleteThread(id);
     if (this.activeThread?.id === id) {
-      await this.mirror.disconnect();
+      this.interactiveSession?.kill();
+      this.interactiveSession = undefined;
+      this.runtime = undefined;
       this.clearHistoryAttachmentPreviews();
       this.activeThread = undefined; this.activeProject = undefined; this.activeMessages = []; this.fileService = undefined;
       this.skills.clearSource("project");
@@ -995,26 +991,10 @@ export class BrowserAgentApp {
       .map(({ role, content }) => ({ role, content }));
   }
 
-  private onMirrorEvent(event: MirrorEvent): void {
-    this.ui.runtimeStatus.textContent = event.message;
-    if (event.kind === "error" || event.kind === "conflict") this.ui.toast(event.message);
-  }
-
   private onTerminalOutput(data: string): void {
     this.terminal.write(data);
     this.terminalBuffer += stripAnsi(data);
     if (!this.terminalFlushTimer) this.terminalFlushTimer = setTimeout(() => { this.terminalFlushTimer = undefined; void this.flushTerminalTranscript(); }, 900);
-  }
-
-  private reportUnsupportedRuntime(message: string): void {
-    this.ui.runtimeStatus.textContent = "当前页面不支持 Runtime";
-    this.ui.terminalStart.disabled = true;
-    appLog.warn("Runtime 启动被拒绝：浏览器缺少跨源隔离能力", { ...inspectWebContainerSupport() });
-    this.ui.toast(message);
-    if (!this.runtimeUnsupportedReported) {
-      this.runtimeUnsupportedReported = true;
-      this.terminal.writeln(`\r\n\x1b[33m[Runtime] ${message}\x1b[0m`);
-    }
   }
 
   private async flushTerminalTranscript(): Promise<void> {
@@ -1370,7 +1350,6 @@ export class BrowserAgentApp {
     if (!this.activeRunController || this.activeRunController.signal.aborted) return;
     this.activeAgentSession?.abort(new DOMException("用户停止了运行。", "AbortError"));
     this.activeRunController.abort(new DOMException("用户停止了运行。", "AbortError"));
-    this.interactiveSession?.kill();
     this.ui.stopRun.disabled = true;
     this.ui.toast("正在停止模型、工具与 Runtime…");
   }
@@ -1552,7 +1531,7 @@ export class BrowserAgentApp {
       if (!window.confirm(`${errorMessage(error)}\n\n是否强制恢复这一个变更？`)) throw error;
       await service.restoreChange(match.changeSet.runId, match.change.id, { force: true });
     }
-    if (this.mirror.ready) await this.mirror.syncExternalChanges();
+    await service.refresh();
     await this.refreshProjectPanels();
   }
 
@@ -1575,7 +1554,7 @@ export class BrowserAgentApp {
       if (!window.confirm(`${errorMessage(error)}\n\n是否忽略指纹冲突并强制恢复？`)) return false;
       await service.restoreRun(runId, { force: true });
     }
-    if (this.mirror.ready) await this.mirror.syncExternalChanges();
+    await service.refresh();
     await this.refreshProjectPanels();
     this.ui.toast("运行变更已恢复。 ");
     return true;

@@ -1,7 +1,7 @@
 {
   "name": "browser-agent",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -33,23 +33,28 @@
     "verify": "pnpm version:check && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm audit --prod && pnpm build && pnpm check:bundle && pnpm test:e2e && pnpm test:runtime && pnpm verify:office"
   },
   "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@langchain/core": "^1.2.2",
     "@langchain/deepseek": "^1.1.5",
     "@langchain/openai": "^1.5.5",
-    "@webcontainer/api": "^1.6.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "docx": "^9.5.1",
+    "esbuild-wasm": "0.28.2",
+    "fflate": "0.8.3",
     "jszip": "^3.10.1",
     "loglevel": "^1.9.2",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.2.108",
     "pptxgenjs": "^4.0.1",
+    "quickjs-emscripten-core": "0.32.0",
+    "semver": "7.8.5",
     "xlsx": "file:vendor/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "^24.0.0",
+    "@types/semver": "7.7.1",
     "fake-indexeddb": "^6.2.4",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",

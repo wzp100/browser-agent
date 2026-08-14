@@ -435,10 +435,10 @@ test("AgentToolRegistry 在权限预检前验证参数 schema", async () => {
 
 test("系统提示明确注入特殊 jsh 环境和已安装 Skill", () => {
   const prompt = buildSystemPrompt({
-    runtime: { id: "runtime.webcontainer", available: true, shell: "WebContainer jsh", workingDirectory: ".", runtimeCommandsUseRelativePaths: true, limitations: ["只保证 Node.js"] },
+    runtime: { id: "browser-agent-virtual", available: true, shell: "Virtual Bash", workingDirectory: ".", runtimeCommandsUseRelativePaths: true, limitations: ["只支持纯 JavaScript 包"] },
     skills: [{ id: "spreadsheet-analysis", name: "spreadsheet-analysis", description: "浏览器内处理表格", source: "builtin" }]
   });
-  assert.match(prompt, /特殊的 WebContainer `jsh` Shell/);
+  assert.match(prompt, /浏览器内置的虚拟 Bash/);
   assert.match(prompt, /不是 Windows PowerShell、CMD、宿主 Linux Bash/);
   assert.match(prompt, /不要调用或探测 Python\/python3\/pip\/conda/);
   assert.match(prompt, /项目根目录：\./);

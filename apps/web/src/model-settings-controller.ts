@@ -139,9 +139,11 @@ export class ModelSettingsController {
   }
 
   refreshModels(signal?: AbortSignal): Promise<ModelDiscoveryResult> {
+    const apiKey = readProviderApiKey(this.currentProfile.id);
     return discoverProviderModels(this.currentProfile, {
-      apiKey: readProviderApiKey(this.currentProfile.id),
+      apiKey,
       manualModelId: this.current.model,
+      queryProvider: this.currentProfile.kind === "gateway" || Boolean(apiKey) || !this.currentProfile.builtIn,
       cache: this.repository,
       ...(signal ? { signal } : {})
     });

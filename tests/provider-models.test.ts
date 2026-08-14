@@ -50,6 +50,24 @@ test("供应商 /models 与 models.dev 元数据合并且保留手动模型", as
   assert.equal(manual?.capabilities.toolCalling, "unknown");
 });
 
+test("内置供应商未配置凭据时可跳过受保护的模型目录", async () => {
+  const cache = new MemoryCatalogCache({
+    key: "models-dev-cache",
+    fetchedAt: "2026-07-20T00:00:00.000Z",
+    catalog: { openai: { models: {} } }
+  });
+  let requests = 0;
+  const result = await discoverProviderModels(profile, {
+    cache,
+    queryProvider: false,
+    now: () => new Date("2026-07-20T01:00:00.000Z"),
+    fetcher: async () => { requests += 1; return Response.json({ data: [] }); }
+  });
+  assert.equal(requests, 0);
+  assert.equal(result.providerError, undefined);
+  assert.deepEqual(result.models.map((model) => model.id), ["manual-model"]);
+});
+
 test("models.dev 缓存超过 24 小时后携带 ETag 并接受 304", async () => {
   const cache = new MemoryCatalogCache({ key: "models-dev-cache", etag: '"catalog-v1"', fetchedAt: "2026-07-18T00:00:00.000Z", catalog: { openai: { models: {} } } });
   let requestHeaders: Headers | undefined;

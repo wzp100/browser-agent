@@ -11,6 +11,7 @@ export interface ModelsDevCacheStore {
 export interface ModelDiscoveryOptions {
   apiKey?: string;
   manualModelId?: string;
+  queryProvider?: boolean;
   cache?: ModelsDevCacheStore;
   fetcher?: typeof fetch;
   signal?: AbortSignal;
@@ -46,18 +47,20 @@ export async function discoverProviderModels(profile: ProviderProfile, options: 
   const now = options.now ?? (() => new Date());
   let providerModels: ProviderModel[] = [];
   let providerError: string | undefined;
-  try {
-    const response = await fetcher(modelsEndpoint(profile), {
-      ...(options.apiKey ? { headers: { Authorization: `Bearer ${options.apiKey}` } } : {}),
-      ...(options.signal ? { signal: options.signal } : {})
-    });
-    if (!response.ok) throw new Error(`模型列表接口返回 ${response.status}`);
-    const body = await response.json() as { data?: unknown; models?: unknown } | unknown[];
-    const candidates = Array.isArray(body) ? body : Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : [];
-    providerModels = candidates.filter((item): item is ProviderModel => Boolean(item && typeof item === "object" && typeof (item as ProviderModel).id === "string"));
-  } catch (error) {
-    if (options.signal?.aborted) throw error;
-    providerError = errorMessage(error);
+  if (options.queryProvider !== false) {
+    try {
+      const response = await fetcher(modelsEndpoint(profile), {
+        ...(options.apiKey ? { headers: { Authorization: `Bearer ${options.apiKey}` } } : {}),
+        ...(options.signal ? { signal: options.signal } : {})
+      });
+      if (!response.ok) throw new Error(`模型列表接口返回 ${response.status}`);
+      const body = await response.json() as { data?: unknown; models?: unknown } | unknown[];
+      const candidates = Array.isArray(body) ? body : Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : [];
+      providerModels = candidates.filter((item): item is ProviderModel => Boolean(item && typeof item === "object" && typeof (item as ProviderModel).id === "string"));
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      providerError = errorMessage(error);
+    }
   }
 
   let catalog: unknown;

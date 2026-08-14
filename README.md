@@ -167,7 +167,11 @@ tests/                 Unit, integration, and browser E2E tests
 
 ## Deployment
 
-The included GitHub Actions workflow verifies and deploys both long-lived branches when the repository has `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` configured:
+The included GitHub Actions workflow verifies and deploys both long-lived branches. Verification and production builds require a StackBlitz WebContainer API client key in `VITE_WEBCONTAINER_API_KEY`; CI reads it from the repository Actions variable `WEBCONTAINER_API_KEY`. The client key is embedded in the browser bundle by design and is not a server secret. Never reuse a model-provider API key for it.
+
+For local production builds, copy [`apps/web/.env.example`](apps/web/.env.example) to `apps/web/.env.local` and set the client key. Development mode can open without it, but Runtime startup will fail with an explicit configuration error until it is present. Production builds deliberately stop instead of emitting a deployment whose Runtime cannot boot.
+
+Automatic deployment additionally requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`:
 
 | Branch | Purpose | Site |
 |---|---|---|
@@ -190,7 +194,7 @@ pnpm cloudflare:deploy:preview
 pnpm cloudflare:deploy:production
 ```
 
-The deploy scripts build before uploading and map preview to `develop` and production to `main`. For CI, create a scoped Cloudflare API token with **Account / Cloudflare Pages / Edit**, save it as the GitHub Actions secret `CLOUDFLARE_API_TOKEN`, and set the account ID as the Actions variable `CLOUDFLARE_ACCOUNT_ID`. The response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
+The deploy scripts build before uploading and map preview to `develop` and production to `main`. For CI, set the WebContainer client key as the Actions variable `WEBCONTAINER_API_KEY`, create a scoped Cloudflare API token with **Account / Cloudflare Pages / Edit**, save it as the GitHub Actions secret `CLOUDFLARE_API_TOKEN`, and set the account ID as the Actions variable `CLOUDFLARE_ACCOUNT_ID`. The response headers are defined in [`apps/web/public/_headers`](apps/web/public/_headers).
 
 ## Documentation
 

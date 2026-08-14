@@ -3,6 +3,7 @@ import test from "node:test";
 import { runtimeCwd, runtimeFsPath, toContainerFsPath, toProcessRelativePath, toSpawnWorkingDirectory } from "../packages/runtime-webcontainer/src/paths";
 import { isDependencyMutationCommand, isRuntimeNodeModulesPath, runtimePackageEnvironment } from "../packages/runtime-webcontainer/src/package-cache";
 import { inspectWebContainerSupport } from "../packages/runtime-webcontainer/src/support";
+import { resolveWebContainerApiKey, WEBCONTAINER_API_KEY_ENV_NAME } from "../packages/runtime-webcontainer/src/webcontainer-config";
 import { decodeDependencySnapshot, encodeDependencySnapshot, type DependencySnapshotLimits } from "../packages/runtime-webcontainer/src/dependency-snapshot";
 import { DependencySnapshotCoordinator, dependencySnapshotRetryDelay, type DependencySnapshotTimers } from "../packages/runtime-webcontainer/src/dependency-snapshot-state";
 import { coalesceRuntimeSyncPaths, isDirectorySignal, isRuntimeTemporaryPath, runtimeScriptPaths, shouldMirrorPath } from "../packages/runtime-webcontainer/src/workspace-mirror";
@@ -241,6 +242,12 @@ test("非安全上下文给出 localhost 或 HTTPS 恢复提示", () => {
 
   assert.equal(unsupported.supported, false);
   assert.match(unsupported.message ?? "", /127\.0\.0\.1|HTTPS/);
+});
+
+test("WebContainer client key 必须显式配置且会清理首尾空白", () => {
+  assert.equal(resolveWebContainerApiKey({ [WEBCONTAINER_API_KEY_ENV_NAME]: "  wc-test-key  " }), "wc-test-key");
+  assert.throws(() => resolveWebContainerApiKey(undefined), new RegExp(WEBCONTAINER_API_KEY_ENV_NAME));
+  assert.throws(() => resolveWebContainerApiKey({ [WEBCONTAINER_API_KEY_ENV_NAME]: "   " }), /StackBlitz WebContainer API/);
 });
 
 class ManualSnapshotTimers implements DependencySnapshotTimers {

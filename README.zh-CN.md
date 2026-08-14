@@ -169,7 +169,11 @@ tests/                 单元、集成及浏览器 E2E 测试
 
 ## 部署
 
-仓库内置的 GitHub Actions 工作流会先验证再部署两个长期分支；启用部署需要配置 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`：
+仓库内置的 GitHub Actions 工作流会先验证再部署两个长期分支。验证和生产构建必须通过 `VITE_WEBCONTAINER_API_KEY` 配置 StackBlitz WebContainer API client key；CI 从仓库 Actions Variable `WEBCONTAINER_API_KEY` 读取。该 client key 按官方设计会被编译进浏览器产物，不是服务端密钥；绝不能拿模型供应商的 API Key 代替。
+
+本地生产构建时，将 [`apps/web/.env.example`](apps/web/.env.example) 复制为 `apps/web/.env.local` 并填写 client key。开发模式可以在未配置时打开，但 Runtime 会给出明确配置错误；生产构建会主动停止，避免生成 Runtime 必然无法启动的部署产物。
+
+自动部署还需要配置 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`：
 
 | 分支 | 用途 | 站点 |
 |---|---|---|
@@ -192,7 +196,7 @@ pnpm cloudflare:deploy:preview
 pnpm cloudflare:deploy:production
 ```
 
-部署脚本会先构建，再将预览部署映射到 `develop`、生产部署映射到 `main`。CI 需要创建仅含 **Account / Cloudflare Pages / Edit** 权限的 API Token，保存为 GitHub Actions Secret `CLOUDFLARE_API_TOKEN`，并将账户 ID 保存为 Actions Variable `CLOUDFLARE_ACCOUNT_ID`。响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
+部署脚本会先构建，再将预览部署映射到 `develop`、生产部署映射到 `main`。CI 需要将 WebContainer client key 保存为 Actions Variable `WEBCONTAINER_API_KEY`，创建仅含 **Account / Cloudflare Pages / Edit** 权限的 API Token 并保存为 GitHub Actions Secret `CLOUDFLARE_API_TOKEN`，再将账户 ID 保存为 Actions Variable `CLOUDFLARE_ACCOUNT_ID`。响应头配置位于 [`apps/web/public/_headers`](apps/web/public/_headers)。
 
 ## 文档
 

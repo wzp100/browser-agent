@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PDFDocument } from "pdf-lib";
 import { AgentToolRegistry } from "../packages/command-core/src/index";
 import { createDocument, inspectDocument, validateDocument } from "../packages/document-engine/src/index";
 import { OfficeCapabilityProvider, registerOfficeAgentTools } from "../packages/office-pack/src/index";
@@ -38,6 +39,15 @@ test("PDF 创建后可重新检查、读取文本并合并", async () => {
   assert.equal((await inspectPdf("/report.pdf", first)).pageCount, 1);
   assert.match((await readPdf(first))[0]?.text ?? "", /Validated PDF output/);
   assert.equal((await inspectPdf("/merged.pdf", await mergePdfs([first, second]))).pageCount, 2);
+});
+
+test("PDF 读取拒绝包含 JavaScript 动作的文件", async () => {
+  const document = await PDFDocument.create();
+  document.addPage();
+  document.addJavaScript("malicious", "globalThis.__browserAgentPdfScriptExecuted = true");
+  const data = await document.save();
+  await assert.rejects(() => readPdf(data), /不支持包含嵌入脚本的 PDF/);
+  assert.equal((globalThis as typeof globalThis & { __browserAgentPdfScriptExecuted?: boolean }).__browserAgentPdfScriptExecuted, undefined);
 });
 
 test("Office Agent 工具可在浏览器主线程读取并转换工作簿", async () => {

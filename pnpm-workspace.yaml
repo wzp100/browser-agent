@@ -1,6 +1,13 @@
 packages:
   - apps/*
   - packages/*
+overrides:
+  # PptxGenJS disables image-size in browsers and its published ESM bundle does
+  # not import it. Browser Agent only uses that browser bundle, so do not install
+  # the unused Node-only parser and its vulnerable ICNS/JXL/HEIF code paths.
+  "pptxgenjs@4.0.1>image-size": "-"
+  "nanoid@<3.3.18": 3.3.18
+  "postcss@<=8.5.22": 8.5.26
 allowBuilds:
   esbuild: true
   workerd: true

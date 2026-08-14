@@ -7,6 +7,7 @@ import { isDependencyMutationCommand, isRuntimeNodeModulesPath, runtimePackageEn
 import { decodeDependencySnapshot, encodeDependencySnapshot } from "./dependency-snapshot";
 import { DependencySnapshotCoordinator, type DependencySnapshotFailure, type DependencySnapshotState } from "./dependency-snapshot-state";
 import { inspectWebContainerSupport } from "./support";
+import { resolveWebContainerApiKey } from "./webcontainer-config";
 
 const runtimeLog = logger("runtime.webcontainer");
 export const RUNTIME_TEMP_DIRECTORY = "/.browser-agent/runtime-tmp";
@@ -15,6 +16,7 @@ interface SharedWebContainerState {
   container?: WebContainer;
   bootPromise?: Promise<WebContainer>;
   bootError?: Error;
+  configuredApiKey?: string;
 }
 
 type RuntimeGlobal = typeof globalThis & { __agentCodexWebContainer?: SharedWebContainerState };
@@ -535,8 +537,17 @@ async function sharedWebContainer(): Promise<WebContainer> {
     return state.bootPromise;
   }
   const coep = "credentialless" as const;
+  const apiKey = resolveWebContainerApiKey();
   runtimeLog.info("创建页面级 WebContainer 单例", { coep, isolated: inspectWebContainerSupport().crossOriginIsolated });
-  const { WebContainer: WebContainerApi } = await import("@webcontainer/api");
+  const { WebContainer: WebContainerApi, configureAPIKey } = await import("@webcontainer/api");
+  if (state.configuredApiKey && state.configuredApiKey !== apiKey) {
+    throw new Error("页面内的 WebContainer API Key 已发生变化。请完整刷新页面后重试。");
+  }
+  if (!state.configuredApiKey) {
+    configureAPIKey(apiKey);
+    state.configuredApiKey = apiKey;
+    runtimeLog.info("已在 WebContainer.boot 前配置 API client key");
+  }
   state.bootPromise = WebContainerApi.boot({ coep, workdirName: "workspace", forwardPreviewErrors: "exceptions-only" })
     .then((container) => {
       state.container = container;

@@ -24,15 +24,13 @@ export async function validatePdf(data: Uint8Array): Promise<string> {
 }
 
 export async function readPdf(data: Uint8Array, startPage = 1, pageCount = 20): Promise<PdfTextPage[]> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const loading = pdfjs.getDocument({ data: data.slice() });
-  const document = await loading.promise;
-  const first = Math.min(Math.max(Math.trunc(startPage), 1), document.numPages);
-  const last = Math.min(document.numPages, first + Math.min(Math.max(Math.trunc(pageCount), 1), 50) - 1);
+  const { document: pdf, loading } = await loadSafePdf(data);
+  const first = Math.min(Math.max(Math.trunc(startPage), 1), pdf.numPages);
+  const last = Math.min(pdf.numPages, first + Math.min(Math.max(Math.trunc(pageCount), 1), 50) - 1);
   const pages: PdfTextPage[] = [];
   try {
     for (let pageNumber = first; pageNumber <= last; pageNumber += 1) {
-      const page = await document.getPage(pageNumber);
+      const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
       const text = content.items.map((item) => "str" in item ? item.str : "").filter(Boolean).join(" ");
       pages.push({ page: pageNumber, text });
@@ -44,9 +42,7 @@ export async function readPdf(data: Uint8Array, startPage = 1, pageCount = 20): 
 
 export async function renderPdfPage(data: Uint8Array, pageNumber: number, scale = 1.5): Promise<Uint8Array> {
   if (typeof document === "undefined") throw new Error("PDF 页面渲染需要浏览器 Canvas。 ");
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const loading = pdfjs.getDocument({ data: data.slice() });
-  const pdf = await loading.promise;
+  const { document: pdf, loading } = await loadSafePdf(data);
   try {
     if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > pdf.numPages) throw new Error(`PDF 页码越界：${pageNumber}`);
     const page = await pdf.getPage(pageNumber);
@@ -60,6 +56,21 @@ export async function renderPdfPage(data: Uint8Array, pageNumber: number, scale 
     const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PDF 页面 PNG 编码失败。")), "image/png"));
     return new Uint8Array(await blob.arrayBuffer());
   } finally { await loading.destroy(); }
+}
+
+async function loadSafePdf(data: Uint8Array) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const loading = pdfjs.getDocument({ data: data.slice() });
+  try {
+    const document = await loading.promise;
+    // Browser Agent never creates PDF.js' scripting manager or annotation layer.
+    // Reject scripted documents as a second boundary beyond the patched parser.
+    if (await document.hasJSActions()) throw new Error("出于安全原因，不支持包含嵌入脚本的 PDF。 ");
+    return { document, loading };
+  } catch (error) {
+    await loading.destroy();
+    throw error;
+  }
 }
 
 export async function createPdf(title: string, paragraphs: string[]): Promise<Uint8Array> {

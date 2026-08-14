@@ -1,7 +1,7 @@
 {
   "name": "browser-agent",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -43,7 +43,7 @@
     "jszip": "^3.10.1",
     "loglevel": "^1.9.2",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^6.1.200",
+    "pdfjs-dist": "^6.2.108",
     "pptxgenjs": "^4.0.1",
     "xlsx": "file:vendor/xlsx-0.20.3.tgz"
   },

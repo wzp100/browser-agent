@@ -52,7 +52,7 @@
     "xlsx": "file:vendor/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.0.0",
     "@types/semver": "7.7.1",
     "fake-indexeddb": "^6.2.4",

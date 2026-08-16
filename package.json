@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
-    "@langchain/core": "^1.2.2",
+    "@langchain/core": "^1.2.6",
     "@langchain/deepseek": "^1.1.5",
     "@langchain/openai": "^1.5.5",
     "@xterm/addon-fit": "^0.10.0",

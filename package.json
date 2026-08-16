@@ -57,7 +57,7 @@
     "@types/semver": "7.7.1",
     "fake-indexeddb": "^6.2.4",
     "tsx": "^4.20.0",
-    "typescript": "^5.8.0",
+    "typescript": "^7.0.2",
     "vite": "^7.0.0",
     "wrangler": "4.114.0"
   }

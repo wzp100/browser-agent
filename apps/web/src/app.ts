@@ -34,6 +34,8 @@ import { loadProjectInstructions } from "../../../packages/project-context/src/i
 import { importProjectBackup, serializeProjectBackup, type ProjectBackupImportBundle } from "../../../packages/project-backup/src/index";
 import type { InteractiveRuntimeSession, RuntimeSession, ScriptExecutionRequest, ScriptExecutionResult, ScriptRuntimeProvider, TerminalDimensions } from "../../../packages/runtime-contracts/src/index";
 import { ProjectVirtualFileSystem, VirtualRuntimeProvider } from "../../../packages/runtime-virtual/src/index";
+import { NativeBridgeClient } from "../../../packages/runtime-native/src/index";
+import { registerNativeBridgeTools } from "../../../packages/host-bridge-tools/src/index";
 import { BrowserSkillStore, SkillRegistry, skillFromMarkdown, type SkillDescriptor, type SkillFile } from "../../../packages/skill-core/src/index";
 import { appendWorkspaceFileLinks, browserAgentRunScratchDirectory, BROWSER_AGENT_PACKAGE_DIRECTORY, BROWSER_AGENT_STATE_DIRECTORY, isBrowserAgentInternalPath, OpfsChangeJournal, ProjectFileLogSink, ProjectFileService, resolveDirectoryPermission, type BrowserDirectoryHandle } from "../../../packages/workspace-contracts/src/index";
 import { AppUi } from "./ui";
@@ -60,6 +62,8 @@ export class BrowserAgentApp {
   private readonly logStore = new BrowserLogStore(this.database);
   private readonly skills = new SkillRegistry(new BrowserSkillStore());
   private runtime: VirtualRuntimeProvider | undefined;
+  /** Memory-only authenticated local companion; disconnect/reload returns to virtual-only mode. */
+  private readonly nativeBridge = new NativeBridgeClient();
   private readonly terminal = new Terminal({
     convertEol: true,
     cursorBlink: true,
@@ -159,6 +163,9 @@ export class BrowserAgentApp {
     this.ui.terminalStart.addEventListener("click", () => { void this.ensureRuntime(true).catch(() => undefined); });
     this.ui.terminalToggle.addEventListener("click", () => this.setTerminalCollapsed(!this.terminalCollapsed));
     this.ui.terminalClear.addEventListener("click", () => void this.clearTerminalHistory());
+    this.ui.nativeBridgeConnect.addEventListener("click", () => void this.connectNativeBridge());
+    this.ui.nativeBridgeDisconnect.addEventListener("click", () => this.disconnectNativeBridge());
+    this.ui.nativeBridgeGrant.addEventListener("click", () => void this.grantNativeCapability());
     this.ui.settingsTrigger.addEventListener("click", () => { this.ui.settingsDialog.showModal(); void this.updateStorageUsage(); void this.refreshLogs(); });
     this.ui.appLanguage.addEventListener("change", () => {
       if (!saveLocalePreference(this.ui.appLanguage.value as AppLocalePreference)) {
@@ -508,6 +515,12 @@ export class BrowserAgentApp {
         authorizeNetwork: (url) => this.authorizeNetwork(url)
       });
       registerOfficeAgentTools(tools, { workspace: fileService, onWorkspaceWrite });
+      // Native tools are separately named and only exist after a successful local pairing.
+      // Only opaque grant handles are injected into the model context; bearer and daemon grant ids stay in NativeBridgeClient memory.
+      const nativeGrants = this.nativeBridge.connected && this.activeProject?.permissionMode !== "readOnly"
+        ? await this.nativeBridge.agentGrantHandles()
+        : [];
+      if (this.nativeBridge.connected && this.activeProject?.permissionMode !== "readOnly") registerNativeBridgeTools(tools, this.nativeBridge);
       const mcpConnections = await registerConfiguredMcpTools(tools, this.mcpServers, (url) => this.authorizeNetwork(url), controller.signal);
       const projectInstructions = await loadProjectInstructions(fileService, this.activeProject?.instructionsEnabled === true);
       const environment = {
@@ -521,6 +534,7 @@ export class BrowserAgentApp {
         },
         skills: this.skills.list(),
         mcpServers: mcpConnections.map((connection) => ({ name: connection.server.name, toolCount: connection.tools.length })),
+        nativeGrants,
         scratchDirectory: browserAgentRunScratchDirectory(run.id),
         ...(projectInstructions ? { projectInstructions } : {})
       };
@@ -1355,10 +1369,68 @@ export class BrowserAgentApp {
   }
 
   private async authorizeTool(toolId: string, argumentsValue: Record<string, unknown>): Promise<void> {
-    if (this.allowWritesForCurrentRun) return;
+    // A workspace-wide approval is never a native-host grant. Host calls always get a visible per-call confirmation.
+    const isHost = toolId.startsWith("host.");
+    if (!isHost && this.allowWritesForCurrentRun) return;
     const detail = await this.authorizationPreview(toolId, argumentsValue);
     if (!window.confirm(`Agent 请求执行需要授权的工具：${toolId}\n\n${detail}\n\n仅允许此次调用？`)) throw new Error(`用户拒绝执行工具：${toolId}`);
-    if (window.confirm("是否允许本次运行后续所有写入和执行操作？\n\n选择“取消”只授权刚才这一项。")) this.allowWritesForCurrentRun = true;
+    if (!isHost && window.confirm("是否允许本次运行后续所有写入和执行操作？\n\n选择“取消”只授权刚才这一项。")) this.allowWritesForCurrentRun = true;
+  }
+
+  private async connectNativeBridge(): Promise<void> {
+    try {
+      const paired = await this.nativeBridge.pair(this.ui.nativeBridgeEndpoint.value.trim(), this.ui.nativeBridgeCode.value.trim());
+      // Pairing material is one-time and never retained in settings, storage, logs, or project files.
+      this.ui.nativeBridgeCode.value = "";
+      this.syncNativeGrantOptions(paired.capabilities);
+      this.ui.nativeBridgeStatus.textContent = `已连接 · ${paired.fingerprint} · ${paired.capabilities.filter((item) => item.available).length} 项可用能力。仍需单独授权。`;
+      if (this.activeProject) { this.activeProject = { ...this.activeProject, nativeBridgeEndpoint: this.ui.nativeBridgeEndpoint.value.trim() }; await this.projects.put(this.activeProject); }
+      await this.renderNativeBridgeGrants();
+      this.ui.toast("Native bridge 已配对；宿主工具会在下一次 Agent 运行中按授权显示。");
+    } catch (error) { this.ui.nativeBridgeStatus.textContent = `连接失败：${errorMessage(error)}`; this.ui.toast(errorMessage(error)); }
+  }
+
+  private disconnectNativeBridge(): void {
+    this.nativeBridge.disconnect();
+    this.ui.nativeBridgeCode.value = "";
+    this.syncNativeGrantOptions();
+    this.ui.nativeBridgeStatus.textContent = "未连接：仅使用 Virtual Runtime。";
+    this.ui.nativeBridgeGrants.textContent = "没有活动的 Native grant。";
+    this.ui.toast("Native bridge 会话已断开；虚拟 Runtime 未受影响。");
+  }
+
+  private syncNativeGrantOptions(capabilities?: Array<{ capability: string; available: boolean }>): void {
+    const available = new Map(capabilities?.map((item) => [item.capability, item.available]) ?? []);
+    for (const option of this.ui.nativeBridgeCapability.options) option.disabled = capabilities !== undefined && available.get(option.value) !== true;
+    if (this.ui.nativeBridgeCapability.selectedOptions[0]?.disabled) {
+      const first = [...this.ui.nativeBridgeCapability.options].find((option) => !option.disabled);
+      if (first) this.ui.nativeBridgeCapability.value = first.value;
+    }
+    this.ui.nativeBridgeGrant.disabled = capabilities !== undefined && ![...this.ui.nativeBridgeCapability.options].some((option) => !option.disabled);
+  }
+
+  private async grantNativeCapability(): Promise<void> {
+    if (!this.nativeBridge.connected) { this.ui.toast("请先连接 Native bridge。"); return; }
+    let scope: Record<string, unknown>;
+    try { const parsed: unknown = JSON.parse(this.ui.nativeBridgeScope.value); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("范围必须是 JSON 对象"); scope = parsed as Record<string, unknown>; }
+    catch (error) { this.ui.toast(`范围无效：${errorMessage(error)}`); return; }
+    const capability = this.ui.nativeBridgeCapability.value;
+    if (!window.confirm(`授予一次 Native capability？\n\n${capability}\n${JSON.stringify(scope, null, 2)}\n\n仅在本地 bridge 的既有策略允许时生效。`)) return;
+    const mode = this.ui.nativeBridgeGrantMode.value as "once" | "run" | "session";
+    try { await this.nativeBridge.requestGrant({ capability, scope, mode, ...(this.activeProject ? { projectId: this.activeProject.id } : {}) }); await this.renderNativeBridgeGrants(); this.ui.toast("Native grant 已创建；每次 host.* 调用仍会显示 Agent 确认。"); }
+    catch (error) { this.ui.toast(`Native grant 被拒绝：${errorMessage(error)}`); }
+  }
+
+  private async renderNativeBridgeGrants(): Promise<void> {
+    if (!this.nativeBridge.connected) return;
+    try {
+      const grants = await this.nativeBridge.grants();
+      this.ui.nativeBridgeGrants.replaceChildren(...grants.map((grant) => {
+        const row = document.createElement("div"); const revoke = document.createElement("button"); revoke.type = "button"; revoke.textContent = "撤销"; revoke.addEventListener("click", () => void this.nativeBridge.revokeGrant(grant.id).then(() => this.renderNativeBridgeGrants()));
+        row.textContent = `${grant.capability} · ${grant.mode} · 到期 ${new Date(grant.expiresAt).toLocaleString()} · ${grant.id.slice(0, 8)} `; row.append(revoke); return row;
+      }));
+      if (!grants.length) this.ui.nativeBridgeGrants.textContent = "没有活动的 Native grant。";
+    } catch (error) { this.ui.nativeBridgeGrants.textContent = `无法读取 grant：${errorMessage(error)}`; }
   }
 
   private async authorizationPreview(toolId: string, argumentsValue: Record<string, unknown>): Promise<string> {
@@ -1430,6 +1502,7 @@ export class BrowserAgentApp {
     const service = this.fileService;
     if (!project) return;
     this.ui.setPermissionMode(project.permissionMode ?? "auto");
+    this.ui.nativeBridgeEndpoint.value = project.nativeBridgeEndpoint ?? "";
     let source: string | undefined;
     if (service) {
       if (await service.exists("/.browser-agent/instructions.md")) source = "/.browser-agent/instructions.md";

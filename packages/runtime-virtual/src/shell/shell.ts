@@ -1,4 +1,4 @@
-import { displayVirtualPath, joinVirtualPath, resolveVirtualPath } from "../paths";
+import { displayVirtualPath, joinVirtualPath, normalizeInternalPath, resolveVirtualPath } from "../paths";
 import { bytesText, EMPTY_BYTES, shellResult, textBytes, type ShellCommandHandler, type ShellProcessResult, type VirtualFileSystem } from "../types";
 import type { ShellCommandNode, ShellPipelineNode, ShellRedirection, ShellWord } from "./ast";
 import { createBuiltinCommands } from "./builtins";
@@ -14,11 +14,13 @@ export class VirtualShell {
   private cwd = "/";
   private readonly env = new Map<string, string>([["HOME", "/workspace"], ["PWD", "/workspace"], ["PATH", "/virtual/bin"], ["SHELL", "/virtual/bin/bash"]]);
   private readonly commands: Map<string, ShellCommandHandler>;
+  private readonly fs: VirtualFileSystem;
   private lastExitCode = 0;
 
-  constructor(private readonly fs: VirtualFileSystem, hooks: VirtualShellHooks = {}) {
+  constructor(fs: VirtualFileSystem, hooks: VirtualShellHooks = {}) {
+    this.fs = restrictedShellFilesystem(fs);
     const external = new Map(Object.entries(hooks.commands ?? {}));
-    this.commands = createBuiltinCommands(fs, () => [...external.keys()]);
+    this.commands = createBuiltinCommands(this.fs, () => [...external.keys()]);
     for (const [name, handler] of external) this.commands.set(name, handler);
   }
 
@@ -200,6 +202,25 @@ export class VirtualShell {
     }
     return current.map(displayVirtualPath).sort();
   }
+}
+
+/** Shell commands never need Browser Agent state or nested repository metadata. */
+function restrictedShellFilesystem(fs: VirtualFileSystem): VirtualFileSystem {
+  const assertAllowed = (path: string): string => {
+    const normalized = normalizeInternalPath(path);
+    if (normalized.split("/").some((part) => part === ".git" || part === ".browser-agent")) throw new Error(`终端不能访问保留路径：${displayVirtualPath(normalized)}`);
+    return normalized;
+  };
+  return {
+    readFile: (path) => fs.readFile(assertAllowed(path)),
+    writeFile: (path, data, options) => fs.writeFile(assertAllowed(path), data, options),
+    list: async (path) => (await fs.list(assertAllowed(path))).filter((entry) => !entry.path.split("/").some((part) => part === ".git" || part === ".browser-agent")),
+    stat: (path) => fs.stat(assertAllowed(path)),
+    exists: async (path) => { try { assertAllowed(path); return await fs.exists(path); } catch { return false; } },
+    mkdir: (path, options) => fs.mkdir(assertAllowed(path), options),
+    remove: (path, options) => fs.remove(assertAllowed(path), options),
+    rename: (from, to) => fs.rename(assertAllowed(from), assertAllowed(to))
+  };
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

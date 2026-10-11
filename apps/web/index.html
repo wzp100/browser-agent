@@ -185,6 +185,26 @@
           </section>
 
           <section class="settings-section">
+            <h2>Native Runtime Bridge（可选）</h2>
+            <p>默认关闭。它连接到你手动启动并配对的本机服务；宿主文件、命令、网络、DNS 和计时器均需要单独、可撤销的范围授权。浏览器工作区授权不会授予宿主权限。</p>
+            <label for="native-bridge-endpoint">Loopback endpoint</label>
+            <input id="native-bridge-endpoint" autocomplete="off" placeholder="http://127.0.0.1:43127" />
+            <label for="native-bridge-code">一次性配对码</label>
+            <input id="native-bridge-code" type="password" autocomplete="off" placeholder="仅用于本次配对，不会保存" />
+            <div class="setting-actions"><button id="native-bridge-connect" class="primary-button" type="button">连接并配对</button><button id="native-bridge-disconnect" type="button">断开并清除会话</button></div>
+            <p id="native-bridge-status" class="setting-help">未连接：仅使用 Virtual Runtime。</p>
+            <label for="native-bridge-capability">请求范围授权</label>
+            <select id="native-bridge-capability"><option value="host.fs.read">Host filesystem read</option><option value="host.fs.write">Host filesystem write (mkdir/move/delete require scope flags)</option><option value="host.command.spawn">Host command (high risk)</option><option value="net.http">Native HTTPS</option><option value="net.dns.lookup">Native DNS</option><option value="runtime.timers">Native bounded timer</option></select>
+            <label for="native-bridge-scope">范围 JSON（必须不超过本机策略）</label>
+            <textarea id="native-bridge-scope" rows="3" placeholder='{"rootId":"work","prefixes":["src"]}'></textarea>
+            <label for="native-bridge-grant-mode">授权期限</label>
+            <select id="native-bridge-grant-mode"><option value="once">仅一次调用</option><option value="session">本次连接</option><option value="run">最多一小时</option></select>
+            <button id="native-bridge-grant" type="button">创建 Native grant</button>
+            <div id="native-bridge-grants" class="log-list" aria-live="polite">没有活动的 Native grant。</div>
+            <p class="setting-help">直接宿主文件改动不受浏览器 ChangeSet 回滚管理。命令和 HTTPS 的进度仅在当前运行中通过认证 SSE 显示，不会写入项目或日志。命令不会通过 shell 执行；原生扩展、应用 DOM、Worker 和浏览器存储未向 Agent 公开。</p>
+          </section>
+
+          <section class="settings-section">
             <div class="section-heading">
               <h2>诊断日志</h2>
               <div class="log-actions">

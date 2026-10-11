@@ -219,7 +219,10 @@ export class AgentLoop {
           await emit({ kind: "tool_execution_start", callId: call.id, toolName: call.name, arguments: call.arguments, turn, index: executionIndex });
           if (entry.failure) return entry.failure;
           try {
-            const result = await request.tools.executePrepared(entry.prepared!, request.signal ? { signal: request.signal } : {});
+            const result = await request.tools.executePrepared(entry.prepared!, {
+              ...(request.signal ? { signal: request.signal } : {}),
+              onUpdate: (content) => emit({ kind: "tool_execution_update", callId: call.id, toolName: call.name, content, turn })
+            });
             return normalizeToolSuccess(call, entry.prepared!.tool, result, request.allowImageToolResults === true, loopDetector);
           } catch (error) {
             if (isAbortError(error)) throw error;
@@ -328,7 +331,7 @@ export function isAgentCheckpoint(value: unknown): value is AgentCheckpoint {
       && typeof (item as ToolEvidence).callId === "string"
       && typeof (item as ToolEvidence).toolName === "string"
       && ["context", "read", "write", "execute"].includes((item as ToolEvidence).effect)
-      && ["workspace", "runtime", "network", "conversation", "skill"].includes((item as ToolEvidence).scope)))
+      && ["workspace", "runtime", "network", "conversation", "skill", "host"].includes((item as ToolEvidence).scope)))
     && typeof checkpoint.updatedAt === "string";
   if (!common) return false;
   if (checkpoint.version === 1) return checkpoint.stage === "after-tools";
@@ -515,9 +518,9 @@ export interface CoreToolOptions {
 
 export function createCoreToolRegistry(options: CoreToolOptions): AgentToolRegistry {
   const registry = new AgentToolRegistry({
-    visible: (tool) => options.permissionMode !== "readOnly" || (tool.effect !== "write" && tool.effect !== "execute"),
+    visible: (tool) => options.permissionMode !== "readOnly" || (tool.scope !== "host" && tool.effect !== "write" && tool.effect !== "execute"),
     authorize: async (request) => {
-      if (options.permissionMode === "confirmWrites" && (request.tool.effect === "write" || request.tool.effect === "execute")) await options.authorize?.(request);
+      if (request.tool.requiresAuthorization || (options.permissionMode === "confirmWrites" && (request.tool.effect === "write" || request.tool.effect === "execute"))) await options.authorize?.(request);
     }
   });
   const register = (tool: AgentToolDefinition): void => registry.register({
@@ -533,7 +536,7 @@ export function createCoreToolRegistry(options: CoreToolOptions): AgentToolRegis
   register({ id: "workspace.delete", description: "直接删除真实项目路径；删除前写入 OPFS 恢复日志。", effect: "write", scope: "workspace", inputSchema: schema({ path: stringProperty("项目相对待删除路径。") }, ["path"]), execute: async (args) => { const path = workspaceToolPath(args.path, "path"); await options.workspace.delete(path); await options.onWorkspaceWrite?.(path); return { path, deleted: true }; } });
   register({ id: "shell.exec", description: "在浏览器虚拟 Bash 中执行管道、重定向、常用文件命令、Node.js 或 npm。它不是宿主系统 Shell；没有 Python、EXE、Docker、生命周期脚本或原生扩展。", effect: "execute", scope: "runtime", inputSchema: schema({ command: stringProperty("虚拟 Bash 命令；项目路径使用 .、相对路径或 /workspace。"), timeoutMs: numberProperty("超时毫秒数；JavaScript 最长 60000，Shell 安装任务最长 60000。") }, ["command"]), execute: async (args, context) => { if (!options.runtime) throw runtimeError("Virtual Runtime 不可用。 "); const session = await options.runtime.start(); const timeoutMs = optionalNumber(args.timeoutMs); const result = await options.runtime.execute(session, { source: requiredString(args.command, "command"), workingDirectory: ".", kind: "shell", ...(options.scratchDirectory ? { scratchDirectory: options.scratchDirectory } : {}), ...(context?.signal ? { signal: context.signal } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }) }); if (result.exitCode !== 0) throw runtimeError(`虚拟 Bash 退出码 ${result.exitCode}：${(result.stderr || result.stdout || "无输出").slice(0, 20_000)}`); return result; } });
   register({ id: "javascript.exec", description: "将 JavaScript/TypeScript 与已安装 npm 依赖打包后，在独立 Worker 的 QuickJS/WASM 沙箱中执行。", effect: "execute", scope: "runtime", inputSchema: schema({ source: stringProperty("要执行的完整 JavaScript 或 TypeScript 源码。"), timeoutMs: numberProperty("超时毫秒数，最大 60000。") }, ["source"]), execute: async (args, context) => { if (!options.runtime) throw runtimeError("Virtual Runtime 不可用。 "); const session = await options.runtime.start(); const timeoutMs = optionalNumber(args.timeoutMs); const result = await options.runtime.execute(session, { source: requiredString(args.source, "source"), workingDirectory: ".", kind: "javascript", ...(options.scratchDirectory ? { scratchDirectory: options.scratchDirectory } : {}), ...(context?.signal ? { signal: context.signal } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }) }); if (result.exitCode !== 0) throw runtimeError(`JavaScript 退出码 ${result.exitCode}：${(result.stderr || result.stdout || "无输出").slice(0, 20_000)}`); return result; } });
-  register({ id: "runtime.info", description: "返回浏览器虚拟 Runtime 的真实能力边界、隔离方式和持久 npm 包仓库。", effect: "context", scope: "runtime", inputSchema: schema({}), execute: async () => ({ id: options.runtime?.id ?? "none", available: await options.runtime?.available() ?? false, shell: "Virtual Bash", engine: "QuickJS/WASM Worker", workingDirectory: ".", runtimeCommandsUseRelativePaths: true, packageCache: "/.browser-agent/packages", isHostShell: false, supported: ["Bash 基础命令与管道重定向", "JavaScript/TypeScript", "npm install", "纯 JavaScript npm 包", "持久化依赖"], unsupported: ["Windows PowerShell", "CMD", "宿主 Linux Bash", "Python/python3/pip/conda", "EXE", "Docker", "npm 生命周期脚本", "原生二进制扩展", "完整 Node 内置模块"], limitations: options.runtime?.limitations?.() ?? ["Runtime 未连接"] }) });
+  register({ id: "runtime.info", description: "返回当前选中 Runtime 的真实能力边界。宿主能力只会以单独的 host.* 工具出现，绝不自动升级虚拟 Runtime。", effect: "context", scope: "runtime", inputSchema: schema({}), execute: async () => ({ id: options.runtime?.id ?? "none", available: await options.runtime?.available() ?? false, shell: "Virtual Bash", engine: "QuickJS/WASM Worker", workingDirectory: ".", runtimeCommandsUseRelativePaths: true, packageCache: "/.browser-agent/packages", isHostShell: false, supported: ["Bash 基础命令与管道重定向", "JavaScript/TypeScript", "npm install", "纯 JavaScript npm 包", "持久化依赖"], unsupported: ["Windows PowerShell", "CMD", "宿主 Linux Bash", "Python/python3/pip/conda", "EXE", "Docker", "npm 生命周期脚本", "原生二进制扩展", "完整 Node 内置模块"], limitations: options.runtime?.limitations?.() ?? ["Runtime 未连接"] }) });
   register({ id: "skill.list", description: "列出已安装 Skill 的元数据。", effect: "context", scope: "skill", inputSchema: schema({}), execute: async () => options.skills.list() });
   register({ id: "skill.inspect", description: "根据环境快照中的摘要按需读取一个相关 Skill 的完整 SKILL.md；任务与 Skill 描述匹配时，应在调用该领域工具前使用。", effect: "context", scope: "skill", inputSchema: schema({ id: stringProperty("Skill id。") }, ["id"]), execute: async (args) => options.skills.inspect(requiredString(args.id, "id")) });
   register({ id: "skill.run", description: "在 QuickJS/WASM 沙箱中执行 Skill 的纯 JavaScript 文件；不能运行 Python、PowerShell、EXE 或原生扩展。", effect: "execute", scope: "skill", inputSchema: schema({ id: stringProperty("Skill id。"), script: stringProperty("Skill 内 JavaScript 脚本相对路径。") }, ["id", "script"]), execute: async (args, context) => { if (!options.runtime) throw runtimeError("Virtual Runtime 不可用。 "); const skill = options.skills.inspect(requiredString(args.id, "id")); const scriptPath = requiredString(args.script, "script"); const script = skill.files.find((file) => file.path === scriptPath); if (!script) throw new Error(`Skill 中不存在脚本：${scriptPath}`); const session = await options.runtime.start(); const result = await options.runtime.execute(session, { source: script.content, workingDirectory: ".", kind: "javascript", ...(options.scratchDirectory ? { scratchDirectory: options.scratchDirectory } : {}), ...(context?.signal ? { signal: context.signal } : {}) }); if (result.exitCode !== 0) throw runtimeError(`Skill JavaScript 退出码 ${result.exitCode}：${(result.stderr || result.stdout || "无输出").slice(0, 20_000)}`); return result; } });

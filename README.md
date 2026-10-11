@@ -13,7 +13,7 @@ Work with real local folders, run Bash, Node.js, and npm tools in a first-party 
 
 **English** · [简体中文](README.zh-CN.md)
 
-[Open Browser Agent](https://browser-agent-wzp100-app.pages.dev/) · [Architecture](docs/architecture/ARCHITECTURE.md) · [API configuration](docs/architecture/API-CONFIGURATION.md)
+[Open Browser Agent](https://browser-agent-wzp100-app.pages.dev/) · [Architecture](docs/architecture/ARCHITECTURE.md) · [API configuration](docs/architecture/API-CONFIGURATION.md) · [Optional Native Runtime Bridge](docs/architecture/NATIVE-RUNTIME-BRIDGE.md)
 
 </div>
 
@@ -118,7 +118,7 @@ Provider profiles and model names are stored in IndexedDB. API keys are stored o
 
 The integrated shell is a browser-native virtual Bash, not Windows PowerShell, CMD, host Bash, Docker, or a full virtual machine.
 
-It supports common file commands, variables, conditionals, pipelines, redirections, JavaScript/TypeScript, `node`, `npm install`, and `npx`. npm archives are integrity-checked and lifecycle scripts never run automatically. esbuild bundles code for an isolated QuickJS/WASM Worker with time, memory, and stack budgets. Native binaries, native Node extensions, Python, Docker, and host executables remain out of scope.
+It supports common file commands, variables, conditionals, pipelines, redirections, JavaScript/TypeScript, `node`, `npm install`, and `npx`. npm archives are integrity-checked, lifecycle scripts never run, and native/WASI artifacts are rejected. esbuild bundles code for an isolated QuickJS/WASM Worker with time, memory, stack, and output budgets. The pure-JavaScript Node-core tier includes `assert`/`assert/strict`, `buffer`, `events`, `path`/`path/posix`, `process`, `querystring`, `string_decoder`, `url`, and `util` (with bare and `node:` specifiers). `node:fs/promises` and `node:fs`'s `promises` export provide only `readFile`, `writeFile`, `mkdir`, `readdir`, `stat`, and `access` over a bounded copied `/workspace` snapshot. Writes stay private until a zero-exit execution completes, then are conflict-checked and committed through the virtual workspace; `.git` and `.browser-agent` are never visible. Promise jobs and `process.nextTick` are drained before completion. Network/HTTP/DNS, child processes, timers, streams, native addons, DOM, Worker globals, browser storage, and host executables remain unavailable.
 
 ## Privacy and security
 

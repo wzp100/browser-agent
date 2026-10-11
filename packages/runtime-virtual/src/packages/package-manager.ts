@@ -238,12 +238,17 @@ function packageStorePath(name: string, version: string): string {
 }
 
 function verifyManifest(entries: Array<{ path: string; data: Uint8Array }>, expected: RegistryVersion): void {
+  for (const candidate of entries) {
+    const lower = candidate.path.toLowerCase();
+    if (lower.endsWith(".node") || lower.endsWith(".wasm") || lower === "binding.gyp" || lower.endsWith("/binding.gyp")) throw new Error(`ERR_BROWSER_RUNTIME_NATIVE_ADDON_DENIED: ${expected.name}@${expected.version} contains ${candidate.path}`);
+  }
   const entry = entries.find((candidate) => candidate.path === "package.json");
   if (!entry) throw new Error(`${expected.name}@${expected.version} 缺少 package.json`);
-  let manifest: { name?: string; version?: string };
+  let manifest: { name?: string; version?: string; gypfile?: unknown };
   try { manifest = JSON.parse(bytesText(entry.data)) as { name?: string; version?: string }; }
   catch { throw new Error(`${expected.name}@${expected.version} 的 package.json 无效`); }
   if (manifest.name !== expected.name || manifest.version !== expected.version) throw new Error(`${expected.name}@${expected.version} 的 tarball 身份不匹配`);
+  if (manifest.gypfile === true) throw new Error(`ERR_BROWSER_RUNTIME_NATIVE_ADDON_DENIED: ${expected.name}@${expected.version} declares gypfile`);
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

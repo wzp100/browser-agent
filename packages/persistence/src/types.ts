@@ -72,6 +72,8 @@ export interface ProjectRecord {
   permissionMode?: "readOnly" | "confirmWrites" | "auto";
   instructionsEnabled?: boolean;
   networkAllowlist?: string[];
+  /** Endpoint only; native pairing codes and session tokens are never persisted. */
+  nativeBridgeEndpoint?: string;
   createdAt: string;
   lastOpenedAt: string;
 }

@@ -120,7 +120,7 @@ corepack pnpm@11.7.0 --dir apps/web dev --host 127.0.0.1 --open
 
 集成终端是浏览器虚拟 Bash，不是 Windows PowerShell、CMD、宿主 Bash、Docker 或完整虚拟机。
 
-它支持常用文件命令、变量、条件链、管道、重定向、JavaScript/TypeScript、`node`、`npm install` 和 `npx`。npm 包会校验完整性，生命周期脚本永不自动执行；代码经 esbuild 打包后在独立 Worker 的 QuickJS/WASM 中运行，并受超时、内存和栈预算约束。原生二进制、原生 Node 扩展、Python、Docker 和宿主 EXE 不在运行边界内。
+它支持常用文件命令、变量、条件链、管道、重定向、JavaScript/TypeScript、`node`、`npm install` 和 `npx`。npm 包会校验完整性，生命周期脚本永不执行，并拒绝原生/WASI 制品；代码经 esbuild 打包后在独立 Worker 的 QuickJS/WASM 中运行，并受超时、内存、栈和输出预算约束。纯 JavaScript 的 Node 核心兼容层包含 `assert`/`assert/strict`、`buffer`、`events`、`path`/`path/posix`、`process`、`querystring`、`string_decoder`、`url` 和 `util`（同时支持裸模块和 `node:` 形式）。`node:fs/promises` 与 `node:fs` 的 `promises` 仅提供 `readFile`、`writeFile`、`mkdir`、`readdir`、`stat`、`access`，针对受限且复制的 `/workspace` 快照运行；写入在退出码为 0 前始终私有，随后才经冲突检查提交到虚拟工作区，`.git` 和 `.browser-agent` 永不可见。执行结束前会清空 Promise 作业与 `process.nextTick`。网络/HTTP/DNS、子进程、计时器、流、原生扩展、DOM、Worker 全局对象、浏览器存储和宿主可执行文件仍不可用。
 
 ## 隐私与安全
 

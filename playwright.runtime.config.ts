@@ -17,7 +17,7 @@ export default defineConfig({
     screenshot: "only-on-failure"
   },
   webServer: {
-    command: "corepack pnpm@11.7.0 --dir apps/web build && corepack pnpm@11.7.0 exec wrangler pages dev apps/web/dist --port 8790 --show-interactive-dev-session false",
+    command: "node node_modules/vite/bin/vite.js build apps/web && node node_modules/wrangler/bin/wrangler.js pages dev apps/web/dist --port 8790 --show-interactive-dev-session false",
     url: "http://127.0.0.1:8790",
     reuseExistingServer: false,
     timeout: 180_000

@@ -20,7 +20,9 @@ export interface AgentToolDefinition {
   id: string;
   description: string;
   effect: "context" | "read" | "write" | "execute";
-  scope: "conversation" | "workspace" | "runtime" | "skill" | "network";
+  scope: "conversation" | "workspace" | "runtime" | "skill" | "network" | "host";
+  /** Host bridge tools require a confirmation even when a project uses auto mode. */
+  requiresAuthorization?: boolean;
   concurrency?: "parallel" | "sequential";
   inputSchema: JsonSchema;
   execute(argumentsValue: Record<string, unknown>, context?: ToolExecutionContext): Promise<unknown>;
@@ -28,6 +30,8 @@ export interface AgentToolDefinition {
 
 export interface ToolExecutionContext {
   signal?: AbortSignal;
+  /** Ephemeral operation progress. Consumers must not persist untrusted streamed output. */
+  onUpdate?: (content: string) => void | Promise<void>;
 }
 
 export class ToolAuthorizationError extends Error {

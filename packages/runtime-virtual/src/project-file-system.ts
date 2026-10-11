@@ -22,7 +22,9 @@ export class ProjectVirtualFileSystem implements VirtualFileSystem {
 
   async list(path: string): Promise<VirtualDirectoryEntry[]> {
     const normalized = normalizeInternalPath(path);
-    if (!await this.service.exists(normalized)) throw fsError("ENOENT", normalized);
+    // ProjectFileService deliberately does not accept its root in exists(), while
+    // the virtual filesystem represents that root as `/`.
+    if (normalized !== "/" && !await this.service.exists(normalized)) throw fsError("ENOENT", normalized);
     let entries: ProjectFileEntry[];
     try { entries = await this.service.list(normalized); }
     catch (error) { if (isTypeMismatch(error)) throw fsError("ENOTDIR", normalized); throw error; }
@@ -47,7 +49,7 @@ export class ProjectVirtualFileSystem implements VirtualFileSystem {
     }
   }
 
-  async exists(path: string): Promise<boolean> { return this.service.exists(normalizeInternalPath(path)); }
+  async exists(path: string): Promise<boolean> { const normalized = normalizeInternalPath(path); return normalized === "/" || this.service.exists(normalized); }
   async mkdir(path: string): Promise<void> { await this.service.mkdir(normalizeInternalPath(path), "terminal"); }
 
   async remove(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {

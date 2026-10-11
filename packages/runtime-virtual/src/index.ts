@@ -7,6 +7,7 @@ export * from "./shell/lexer";
 export * from "./shell/parser";
 export * from "./shell/shell";
 export * from "./quickjs/types";
+export * from "./quickjs/sandbox-filesystem";
 export * from "./quickjs/vm";
 export * from "./quickjs/worker-client";
 export * from "./packages/spec";

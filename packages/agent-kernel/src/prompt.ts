@@ -5,6 +5,8 @@ export interface AgentEnvironmentSnapshot {
   runtime: { id: string; available: boolean; shell: string; workingDirectory: string; runtimeCommandsUseRelativePaths?: boolean; limitations: string[] };
   skills: SkillSummary[];
   mcpServers?: Array<{ name: string; toolCount: number }>;
+  /** Opaque app-local references only; daemon grant ids and session credentials are never injected. */
+  nativeGrants?: Array<{ handle: string; capability: string; scope: Record<string, unknown>; mode: string; expiresAt: string }>;
   scratchDirectory?: string;
   projectInstructions?: { path: string; content: string; truncated: boolean };
 }
@@ -47,5 +49,8 @@ export function buildSystemPrompt(environment?: AgentEnvironmentSnapshot): strin
   const mcpServers = environment.mcpServers?.length
     ? environment.mcpServers.map((server) => `- ${server.name}：${server.toolCount} 个工具`).join("\n")
     : "- 当前没有已连接的 MCP Server。";
-  return `${SYSTEM_PROMPT}\n\n【本回合环境快照（由应用注入）】\n- Runtime：${environment.runtime.id}\n- 可用：${environment.runtime.available ? "是" : "否"}\n- Shell：${environment.runtime.shell}\n- 项目根目录：${environment.runtime.workingDirectory}\n- Runtime 命令只使用相对路径：${environment.runtime.runtimeCommandsUseRelativePaths === false ? "否" : "是"}\n- 本回合辅助文件目录：${environment.scratchDirectory ?? "/.browser-agent/state/runs/current/scratch"}\n- 限制：${environment.runtime.limitations.join("；")}\n- 有效 Skill：\n${skills}\n- 已连接 MCP：\n${mcpServers}${instructions}`;
+  const nativeGrants = environment.nativeGrants?.length
+    ? environment.nativeGrants.map((grant) => `- ${grant.handle}：${grant.capability}，范围 ${JSON.stringify(grant.scope)}，${grant.mode}，到期 ${grant.expiresAt}`).join("\n")
+    : "- 当前没有可用于 Agent 的 Native grant。";
+  return `${SYSTEM_PROMPT}\n\n【本回合环境快照（由应用注入）】\n- Runtime：${environment.runtime.id}\n- 可用：${environment.runtime.available ? "是" : "否"}\n- Shell：${environment.runtime.shell}\n- 项目根目录：${environment.runtime.workingDirectory}\n- Runtime 命令只使用相对路径：${environment.runtime.runtimeCommandsUseRelativePaths === false ? "否" : "是"}\n- 本回合辅助文件目录：${environment.scratchDirectory ?? "/.browser-agent/state/runs/current/scratch"}\n- 限制：${environment.runtime.limitations.join("；")}\n- 有效 Skill：\n${skills}\n- 已连接 MCP：\n${mcpServers}\n- Native grant（仅用下列 grantHandle 调用 host.*；这些是不透明引用，不是凭据；每次 host.* 仍须用户确认）：\n${nativeGrants}${instructions}`;
 }

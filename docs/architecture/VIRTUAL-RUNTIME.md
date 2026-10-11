@@ -88,12 +88,12 @@ Shell 使用 lexer → parser → AST → executor 四阶段，不通过字符�
 1. 主线程构建只读文件视图和包依赖图。
 2. `esbuild-wasm` 把 ESM/CommonJS、TypeScript 和已安装包打包为单个脚本。
 3. 专用 Worker 创建 QuickJS Runtime，配置内存和中断处理器。
-4. Worker 注入受控的 `console`、`process`、定时器和虚拟文件 API。
-5. 执行结束返回 stdout、stderr、退出码和文件变更集。
-6. 主线程验证变更路径和预算后，通过 `ProjectFileService` 提交。
+4. Worker 仅注入受控的 `console`、合成 `process`、Promise/next-tick 队列和数据化的虚拟文件快照；不注入定时器、DOM、Worker、网络或浏览器存储。
+5. `node:fs/promises`（以及 `node:fs` 的 `promises`）仅包含 `readFile`、`writeFile`、`mkdir`、`readdir`、`stat`、`access`。它只读取复制到 Worker 的 `/workspace` 快照；`.git` 和 `.browser-agent` 被排除。
+6. 执行结束、Promise 作业排空且退出码为 0 后，主线程验证变更路径、指纹和配额，再通过 `ProjectFileService`/虚拟工作区提交。异常、取消、超时及非零退出码丢弃覆盖层。
 7. 超时或取消直接终止 Worker；Worker 不复用于下一次不可信执行。
 
-支持的 Node 兼容模块由版本化清单声明。首批为 `node:path`、`node:buffer`、`node:events`、`node:util`、`node:assert`、`node:url` 和受控的 `node:fs` / `node:fs/promises`。`child_process`、`cluster`、`net`、`tls`、`worker_threads`、原生扩展和系统动态库始终不可用。
+Node 兼容模块是明确的纯 JavaScript allowlist：`node:path`、`node:buffer`、`node:events`、`node:util`、`node:assert`、`node:url`、`node:querystring`、`node:string_decoder`、`node:process` 和上述受控文件 API。网络/HTTP/DNS、`child_process`、`cluster`、`net`、`tls`、定时器、流、`worker_threads`、原生扩展、WASI、系统动态库和宿主命令始终不可用。
 
 ### 3.5 `PackageManager`
 

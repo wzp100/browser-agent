@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { gzipSync } from "fflate";
-import { MemoryVirtualFileSystem, VirtualShell, VirtualPackageManager, VirtualModuleBundler, VirtualRuntimeProvider, displayVirtualPath, resolveVirtualPath, textBytes, bytesText, lexShell, parseShell, runQuickJsScript, extractNpmTarball } from "../packages/runtime-virtual/src/index";
+import { MemoryVirtualFileSystem, VirtualShell, VirtualPackageManager, VirtualModuleBundler, VirtualRuntimeCommands, VirtualRuntimeProvider, displayVirtualPath, resolveVirtualPath, textBytes, bytesText, lexShell, parseShell, runQuickJsScript, extractNpmTarball } from "../packages/runtime-virtual/src/index";
 
 test("虚拟路径只允许访问 /workspace 且拒绝越过项目根", () => {
   assert.equal(resolveVirtualPath("src/index.ts", "/app"), "/app/src/index.ts");
@@ -93,6 +93,127 @@ test("QuickJS 中断无限循环并返回明确超时码", async () => {
   assert.equal(result.exitCode, 124);
   assert.equal(result.errorCode, "TIMEOUT");
   assert.match(result.stderr, /执行超时/);
+});
+
+test("QuickJS 清空 Promise 作业，并提供受限的 Node process 身份", async () => {
+  const result = await runQuickJsScript({
+    source: `Promise.resolve().then(() => console.log("later")); process.nextTick(() => console.log(process.cwd(), process.argv[1]));`,
+    cwd: "/workspace/src",
+    filename: "/workspace/src/tool.js"
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "/workspace/src /workspace/src/tool.js\nlater\n");
+});
+
+test("process.exit 停止当前执行并保留请求的退出码", async () => {
+  const result = await runQuickJsScript({ source: `console.log("before"); process.exit(7); console.log("after");` });
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.stdout, "before\n");
+  assert.equal(result.stderr, "");
+});
+
+test("被捕获的 process.exit 仍锁定请求的退出码", async () => {
+  const result = await runQuickJsScript({ source: `try { process.exit(7); } catch {} process.exitCode = 0; console.log("continued");` });
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.stdout, "continued\n");
+});
+
+test("浏览器安全 Node 核心兼容层支持 Buffer、events、assert、path、url 和 querystring", async () => {
+  const fs = new MemoryVirtualFileSystem();
+  const bundler = new VirtualModuleBundler(fs, async () => undefined);
+  const bundled = await bundler.bundleSource(`
+    import { Buffer } from "node:buffer";
+    import EventEmitter, { once } from "node:events";
+    import assert from "node:assert/strict";
+    import path from "node:path/posix";
+    import { URL, pathToFileURL, fileURLToPath } from "node:url";
+    import qs from "node:querystring";
+    const emitter = new EventEmitter();
+    const ready = once(emitter, "ready").then(([value]) => console.log(value));
+    emitter.emit("ready", path.basename("/workspace/a.txt"));
+    assert.deepStrictEqual(Buffer.from("✓").toString("hex"), "e29c93");
+    assert.deepStrictEqual(Buffer.from("YQ==", "base64").toString("hex"), "61");
+    assert.deepStrictEqual(Buffer.from("YQ", "base64url").toString("hex"), "61");
+    const url = new URL("https://example.test/a?x=1");
+    assert.equal(pathToFileURL("/workspace/a#b").href, "file:///workspace/a%23b");
+    assert.throws(() => fileURLToPath("file:///workspace-evil/a.txt"), /必须位于/);
+    console.log(Buffer.byteLength("✓"), url.hostname, qs.parse("a=1&a=2").a.join(","), fileURLToPath(pathToFileURL("/workspace/a.txt")));
+  `);
+  const result = await runQuickJsScript({ source: bundled.code });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "3 example.test 1,2 /workspace/a.txt\na.txt\n");
+});
+
+test("不安全的 Node 内置模块在打包时 fail closed", async () => {
+  const bundler = new VirtualModuleBundler(new MemoryVirtualFileSystem(), async () => undefined);
+  const fsShim = await bundler.bundleSource(`import fs from "node:fs"; if (typeof fs.promises.readFile !== "function" || fs.readFile) throw new Error("bad fs shim")`);
+  assert.equal((await runQuickJsScript({ source: fsShim.code })).exitCode, 0);
+  await assert.rejects(() => bundler.bundleSource(`import "node:does-not-exist"`), /ERR_BROWSER_RUNTIME_UNSUPPORTED_BUILTIN/);
+  await assert.rejects(() => bundler.bundleSource(`import "stream/promises"`), /ERR_BROWSER_RUNTIME_UNSUPPORTED_BUILTIN/);
+  await assert.rejects(() => bundler.bundleSource(`import "path/win32"`), /ERR_BROWSER_RUNTIME_UNSUPPORTED_BUILTIN/);
+});
+
+test("node:fs/promises uses a bounded snapshot and commits only successful overlays", async () => {
+  const fs = new MemoryVirtualFileSystem();
+  await fs.mkdir("/src", { recursive: true });
+  await fs.writeFile("/src/input.txt", textBytes("hello"));
+  const commands = new VirtualRuntimeCommands(fs, undefined, { execute: (options) => runQuickJsScript(options) });
+  const shell = new VirtualShell(fs, { commands: commands.handlers });
+  const result = await shell.execute(`cd src; node -e "import('node:fs/promises').then(async fs => { console.log(await fs.readFile('input.txt', 'utf8')); await fs.mkdir('out', {recursive:true}); await fs.writeFile('out/result.bin', Buffer.from([0, 255])); })"`);
+  assert.equal(result.exitCode, 0);
+  assert.equal(bytesText(result.stdout), "hello\n");
+  assert.deepEqual([...await fs.readFile("/src/out/result.bin")], [0, 255]);
+  const denied = await shell.execute(`node -e "import('node:fs/promises').then(fs => fs.readFile('/.browser-agent/virtual-lock.json')).catch(error => console.log(error.code))"`);
+  assert.equal(denied.exitCode, 1);
+  assert.match(`${bytesText(denied.stdout)}${bytesText(denied.stderr)}`, /ERR_BROWSER_RUNTIME_FS_PATH/);
+  const discarded = await shell.execute(`node -e "import('node:fs/promises').then(async fs => { await fs.writeFile('discard.txt', 'no'); process.exitCode=2 })"`);
+  assert.equal(discarded.exitCode, 2);
+  assert.equal(await fs.exists("/discard.txt"), false);
+  const thrown = await shell.execute(`node -e "import('node:fs/promises').then(async fs => { await fs.writeFile('thrown.txt', 'no'); throw new Error('stop') })"`);
+  assert.equal(thrown.exitCode, 1);
+  assert.equal(await fs.exists("/thrown.txt"), false);
+});
+
+test("node:fs 覆盖层拒绝伪造退出、递归保留路径和目录配额绕过", async () => {
+  const fs = new MemoryVirtualFileSystem();
+  await fs.mkdir("/sub/.git", { recursive: true });
+  await fs.writeFile("/sub/.git/config", textBytes("private"));
+  const commands = new VirtualRuntimeCommands(fs, undefined, { execute: (options) => runQuickJsScript(options) });
+  const shell = new VirtualShell(fs, { commands: commands.handlers });
+  const forged = await shell.execute(`node -e "import('node:fs/promises').then(async fs => { await fs.writeFile('forged.txt', 'no'); throw '__BROWSER_RUNTIME_EXIT__' })"`);
+  assert.equal(forged.exitCode, 1);
+  assert.equal(await fs.exists("/forged.txt"), false);
+  const reserved = await shell.execute(`node -e "import('node:fs/promises').then(fs => fs.readFile('sub/.git/config'))"`);
+  assert.equal(reserved.exitCode, 1);
+  assert.match(bytesText(reserved.stderr), /ERR_BROWSER_RUNTIME_FS_PATH/);
+  const quota = await shell.execute(`node -e "import('node:fs/promises').then(async fs => { for (let i = 0; i < 65; i += 1) await fs.mkdir('d' + i); })"`);
+  assert.equal(quota.exitCode, 1);
+  assert.equal(await fs.exists("/d0"), false);
+});
+
+test("非 fs 脚本不受工作区快照配额限制，终端隐藏保留路径", async () => {
+  const fs = new MemoryVirtualFileSystem();
+  for (let index = 0; index < 513; index += 1) await fs.writeFile(`/f${index}`, textBytes("x"));
+  await fs.writeFile("/.browser-agent/virtual-lock.json", textBytes("private"));
+  const commands = new VirtualRuntimeCommands(fs, undefined, { execute: (options) => runQuickJsScript(options) });
+  const shell = new VirtualShell(fs, { commands: commands.handlers });
+  const result = await shell.execute(`node -e "console.log('runs')"`);
+  assert.equal(result.exitCode, 0);
+  assert.equal(bytesText(result.stdout), "runs\n");
+  const reserved = await shell.execute("cat /workspace/.browser-agent/virtual-lock.json");
+  assert.equal(reserved.exitCode, 1);
+  assert.match(bytesText(reserved.stderr), /保留路径/);
+});
+
+test("node 将 shell CWD 和脚本路径传入隔离 process", async () => {
+  const fs = new MemoryVirtualFileSystem();
+  await fs.mkdir("/src", { recursive: true });
+  await fs.writeFile("/src/tool.js", textBytes("console.log(process.cwd(), process.argv.slice(1).join('|'))"));
+  const commands = new VirtualRuntimeCommands(fs, undefined, { execute: (options) => runQuickJsScript(options) });
+  const shell = new VirtualShell(fs, { commands: commands.handlers });
+  const result = await shell.execute("cd src; node tool.js alpha");
+  assert.equal(result.exitCode, 0);
+  assert.equal(bytesText(result.stdout), "/workspace/src /workspace/src/tool.js|alpha\n");
 });
 
 test("npm 安装器解析依赖、校验完整性并写入持久化包仓库", async () => {

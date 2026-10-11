@@ -196,6 +196,16 @@ export class AppUi {
   readonly settingsTrigger = required<HTMLButtonElement>("#settings-trigger");
   readonly appVersion = required<HTMLElement>("#app-version");
   readonly settingsDialog = required<HTMLDialogElement>("#settings-dialog");
+  readonly nativeBridgeEndpoint = required<HTMLInputElement>("#native-bridge-endpoint");
+  readonly nativeBridgeCode = required<HTMLInputElement>("#native-bridge-code");
+  readonly nativeBridgeConnect = required<HTMLButtonElement>("#native-bridge-connect");
+  readonly nativeBridgeDisconnect = required<HTMLButtonElement>("#native-bridge-disconnect");
+  readonly nativeBridgeStatus = required<HTMLElement>("#native-bridge-status");
+  readonly nativeBridgeCapability = required<HTMLSelectElement>("#native-bridge-capability");
+  readonly nativeBridgeScope = required<HTMLTextAreaElement>("#native-bridge-scope");
+  readonly nativeBridgeGrantMode = required<HTMLSelectElement>("#native-bridge-grant-mode");
+  readonly nativeBridgeGrant = required<HTMLButtonElement>("#native-bridge-grant");
+  readonly nativeBridgeGrants = required<HTMLElement>("#native-bridge-grants");
   readonly pluginsDialog = required<HTMLDialogElement>("#plugins-dialog");
   readonly appLanguage = required<HTMLSelectElement>("#app-language");
   readonly providerMode = required<HTMLSelectElement>("#provider-mode");
